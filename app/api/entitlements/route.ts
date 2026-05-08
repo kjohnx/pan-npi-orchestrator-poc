@@ -9,6 +9,8 @@ type EntitlementRow = {
   account_tier: string;
   sku_id: string;
   sku_name: string;
+  sku_pricing_model: string | null;
+  sku_freemium_limit: number | null;
   product_id: string | null;
   product_name: string | null;
   status: string;
@@ -35,7 +37,8 @@ type CreateEntitlementBody = {
 const ENTITLEMENT_QUERY = `
   SELECT
     e.entitlement_id, e.account_id, a.company_name as account_name, a.tier as account_tier, e.sku_id,
-    s.name as sku_name, s.product_id, p.name as product_name,
+    s.name as sku_name, s.pricing_model as sku_pricing_model, s.freemium_limit as sku_freemium_limit,
+    s.product_id, p.name as product_name,
     e.status, e.start_date, e.end_date, e.constraints, e.activated_flags,
     e.locked_flags, e.provisioning_status, e.created_at,
     s.constraint_definitions as sku_constraint_definitions

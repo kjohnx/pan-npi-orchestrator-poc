@@ -242,8 +242,8 @@ Do not wrap the JSON in markdown code fences. Return raw JSON only with no backt
 
 ### `/api/entitlements` (GET, POST)
 - GET: requires `?account_id=ACC-001`. Returns entitlements joined with SKU and product name,
-  **`account_tier`** from `customer_accounts.tier`, and including all JSON fields parsed
-  (not raw strings).
+  **`account_tier`** from `customer_accounts.tier`, the SKU’s **`sku_pricing_model`** and
+  **`sku_freemium_limit`** (from `skus`), and including all JSON fields parsed (not raw strings).
 - POST: create a new entitlement. Auto-set `activated_flags` from SKU's `required_flags`.
   Auto-set `locked_flags` from SKU's `optional_flags`.
 
@@ -300,10 +300,12 @@ on the Published tab and returns the user to the Review tab in PATCH mode.
   (`account_tier`), **Affected SKU ID**, and **Impact Reason** text. Only **ACTIVE**
   entitlements are included; new-SKU preview matches selected **product**; modify-SKU preview
   matches entitlements for the **published SKU id**.
-- **Impact reason copy:** strings such as *"New SKU for selected product …"* are built in
-  **`deriveImpactReason`** in **`app/npi/page.tsx`** (module-level function; search
-  **`New SKU for selected product`** in the repo to find the exact line). Confirm with
-  stakeholders if this logic should remain client-only or move to an API for consistency.
+- **Impact reason copy:** per-row reasons for the **new-SKU** preview are built in
+  **`deriveImpactReason`** in **`app/npi/page.tsx`** (module-level function). It compares the
+  entitlement’s **current SKU** pricing model and freemium limit (from the entitlements API)
+  to the **draft** SKU. Search for **`deriveImpactReason`** or strings like
+  **`Currently on Freemium tier`** to find the implementation. **Modify-SKU** preview still uses
+  the aggregated diff-vs-`publishedSku` copy in the same function.
 - **Publish SKU** → `POST /api/skus` (or **Re-publish** → `PATCH /api/skus/[sku_id]` in modify
   mode) → Published tab with full summary
 

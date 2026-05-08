@@ -71,6 +71,8 @@ type Entitlement = {
   product_id: string | null;
   sku_id: string;
   status: string;
+  sku_pricing_model: string | null;
+  sku_freemium_limit: number | null;
 };
 
 type ImpactRow = {
@@ -78,37 +80,83 @@ type ImpactRow = {
   companyName: string;
   tier: string;
   skuId: string;
+  currentSkuPricingModel: string | null;
+  currentSkuFreemiumLimit: number | null;
   impactReason: string;
 };
+
+/** Current SKU snapshot for the entitlement row being previewed (new-SKU path). */
+type CurrentEntitlementSku = {
+  pricing_model: string | null;
+  freemium_limit: number | null;
+};
+
+function normalizePricingModel(value: string | null | undefined): string {
+  return (value ?? "").trim().toUpperCase();
+}
 
 function sortedFlagKey(flags: string[]) {
   return [...flags].sort().join("\0");
 }
 
-function deriveImpactReason(isModify: boolean, published: PublishedSku | null, draft: SkuDraft): string {
-  if (!isModify || !published) {
-    return "New SKU for selected product — accounts with existing entitlements on this product.";
+function deriveImpactReason(
+  isModify: boolean,
+  published: PublishedSku | null,
+  currentEntitlementSku: CurrentEntitlementSku | null,
+  draft: SkuDraft,
+): string {
+  if (isModify && published) {
+    const reasons: string[] = [];
+    if ((draft.pricing_model || null) !== (published.pricing_model || null)) {
+      reasons.push("Pricing model change would propagate to active entitlements for this SKU.");
+    }
+    if (draft.freemium_limit !== published.freemium_limit) {
+      reasons.push("Freemium limit change would adjust usage metering for active entitlements.");
+    }
+    if (sortedFlagKey(draft.required_flags) !== sortedFlagKey(published.required_flags)) {
+      reasons.push("Required feature flags changed on the SKU.");
+    }
+    if (sortedFlagKey(draft.optional_flags) !== sortedFlagKey(published.optional_flags)) {
+      reasons.push("Optional feature flags changed on the SKU.");
+    }
+    if (JSON.stringify(draft.constraint_definitions) !== JSON.stringify(published.constraint_definitions)) {
+      reasons.push("Constraint definitions changed on the SKU.");
+    }
+    if (reasons.length === 0) {
+      return "SKU update would apply to active entitlements for this SKU.";
+    }
+    return reasons.join(" ");
   }
-  const reasons: string[] = [];
-  if ((draft.pricing_model || null) !== (published.pricing_model || null)) {
-    reasons.push("Pricing model change would propagate to active entitlements for this SKU.");
+
+  if (!currentEntitlementSku) {
+    return "New product offering — no existing entitlement to migrate";
   }
-  if (draft.freemium_limit !== published.freemium_limit) {
-    reasons.push("Freemium limit change would adjust usage metering for active entitlements.");
+
+  const currentModel = normalizePricingModel(currentEntitlementSku.pricing_model);
+  const draftModel = normalizePricingModel(draft.pricing_model);
+
+  if (!currentModel) {
+    return "New SKU version for this product — existing entitlement SKU has no pricing model on file.";
   }
-  if (sortedFlagKey(draft.required_flags) !== sortedFlagKey(published.required_flags)) {
-    reasons.push("Required feature flags changed on the SKU.");
+
+  if (currentModel === "FREEMIUM" && draftModel === "USAGE") {
+    return "Currently on Freemium tier — new SKU switches to usage-based pricing";
   }
-  if (sortedFlagKey(draft.optional_flags) !== sortedFlagKey(published.optional_flags)) {
-    reasons.push("Optional feature flags changed on the SKU.");
+
+  if (currentModel === "USAGE" && draftModel === "FREEMIUM") {
+    const x = draft.freemium_limit;
+    const unit = draft.unit || "units";
+    if (x != null && Number.isFinite(x)) {
+      return `Currently on paid usage — new SKU adds freemium tier with ${x} ${unit} free`;
+    }
+    return "Currently on paid usage — new SKU adds freemium tier with configured free allowance";
   }
-  if (JSON.stringify(draft.constraint_definitions) !== JSON.stringify(published.constraint_definitions)) {
-    reasons.push("Constraint definitions changed on the SKU.");
+
+  if (currentModel === draftModel && draftModel !== "") {
+    return "New SKU version available — pricing model unchanged";
   }
-  if (reasons.length === 0) {
-    return "SKU update would apply to active entitlements for this SKU.";
-  }
-  return reasons.join(" ");
+
+  return `Offering change for this account: current entitlement is ${currentModel}; draft new SKU is ${draftModel || "unspecified"}.`;
 }
 
 type Tab = "input" | "review" | "published";
@@ -274,7 +322,6 @@ export default function NpiPage() {
         }),
       );
 
-      const reason = deriveImpactReason(isModifyMode, publishedSku, draft);
       const rows: ImpactRow[] = [];
 
       for (const list of responses) {
@@ -286,12 +333,22 @@ export default function NpiPage() {
             if (entitlement.sku_id !== publishedSku.sku_id) continue;
           }
 
+          const currentSku: CurrentEntitlementSku | null =
+            isModifyMode && publishedSku
+              ? null
+              : {
+                  pricing_model: entitlement.sku_pricing_model,
+                  freemium_limit: entitlement.sku_freemium_limit,
+                };
+
           rows.push({
             accountId: entitlement.account_id,
             companyName: entitlement.account_name,
             tier: entitlement.account_tier,
             skuId: entitlement.sku_id,
-            impactReason: reason,
+            currentSkuPricingModel: entitlement.sku_pricing_model,
+            currentSkuFreemiumLimit: entitlement.sku_freemium_limit,
+            impactReason: deriveImpactReason(isModifyMode, publishedSku, currentSku, draft),
           });
         }
       }
