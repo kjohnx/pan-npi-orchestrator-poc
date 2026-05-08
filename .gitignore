@@ -1,0 +1,26 @@
+.DS_Store
+node_modules/
+.next/
+.env
+/data/*.db
+
+# Environment files (catch variants beyond just .env)
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# SQLite write-ahead log files (created alongside the .db at runtime)
+/data/*.db-shm
+/data/*.db-wal
+
+# OS files
+Thumbs.db
+
+# Debug logs
+npm-debug.log*
+.pnpm-debug.log*
+
+# TypeScript build cache
+*.tsbuildinfo
+next-env.d.ts
