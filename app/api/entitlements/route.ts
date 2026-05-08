@@ -32,6 +32,11 @@ type FeatureFlagRow = {
   status: string;
 };
 
+type ComponentSkuRow = {
+  sku_id: string;
+  name: string;
+};
+
 type CreateEntitlementBody = {
   account_id?: string;
   sku_id?: string;
@@ -62,16 +67,25 @@ const ENTITLEMENT_QUERY = `
 function mapEntitlement(
   row: EntitlementRow,
   getFlags: (flagIdsJson: string) => FeatureFlagRow[],
+  componentSkuNameById: Map<string, string>,
 ) {
   const activatedFlags = parseJson<string[]>(row.activated_flags, []);
   const lockedFlags = parseJson<string[]>(row.locked_flags, []);
+  const componentSkuIds = parseJson<string[]>(row.component_sku_ids, []);
+  const componentSkus =
+    row.is_bundle === 1
+      ? componentSkuIds.map((skuId) => ({
+          sku_id: skuId,
+          name: componentSkuNameById.get(skuId) ?? skuId,
+        }))
+      : [];
   return {
     ...row,
     constraints: parseJson<Record<string, unknown>>(row.constraints, {}),
     activated_flags: activatedFlags,
     locked_flags: lockedFlags,
     sku_constraint_definitions: parseJson<unknown[]>(row.sku_constraint_definitions, []),
-    component_sku_ids: parseJson<string[]>(row.component_sku_ids, []),
+    component_skus: componentSkus,
     activated_flag_details: getFlags(JSON.stringify(activatedFlags)),
     locked_flag_details: getFlags(JSON.stringify(lockedFlags)),
   };
@@ -98,7 +112,28 @@ export async function GET(request: NextRequest) {
   );
   const getFlags = (flagIdsJson: string) => getFlagsQuery.all(flagIdsJson) as FeatureFlagRow[];
 
-  return NextResponse.json({ data: rows.map((row) => mapEntitlement(row, getFlags)) });
+  const bundleComponentIds = Array.from(
+    new Set(
+      rows.flatMap((row) => (row.is_bundle === 1 ? parseJson<string[]>(row.component_sku_ids, []) : [])),
+    ),
+  );
+  const componentSkuRows =
+    bundleComponentIds.length > 0
+      ? (db
+          .prepare(
+            `
+            SELECT sku_id, name
+            FROM skus
+            WHERE sku_id IN (SELECT value FROM json_each(?))
+            `,
+          )
+          .all(JSON.stringify(bundleComponentIds)) as ComponentSkuRow[])
+      : [];
+  const componentSkuNameById = new Map(componentSkuRows.map((row) => [row.sku_id, row.name]));
+
+  return NextResponse.json({
+    data: rows.map((row) => mapEntitlement(row, getFlags, componentSkuNameById)),
+  });
 }
 
 export async function POST(request: NextRequest) {
@@ -166,5 +201,23 @@ export async function POST(request: NextRequest) {
     `,
   );
   const getFlags = (flagIdsJson: string) => getFlagsQuery.all(flagIdsJson) as FeatureFlagRow[];
-  return NextResponse.json({ data: row ? mapEntitlement(row, getFlags) : null }, { status: 201 });
+  const componentIds =
+    row && row.is_bundle === 1 ? parseJson<string[]>(row.component_sku_ids, []) : [];
+  const componentSkuRows =
+    componentIds.length > 0
+      ? (db
+          .prepare(
+            `
+            SELECT sku_id, name
+            FROM skus
+            WHERE sku_id IN (SELECT value FROM json_each(?))
+            `,
+          )
+          .all(JSON.stringify(componentIds)) as ComponentSkuRow[])
+      : [];
+  const componentSkuNameById = new Map(componentSkuRows.map((component) => [component.sku_id, component.name]));
+  return NextResponse.json(
+    { data: row ? mapEntitlement(row, getFlags, componentSkuNameById) : null },
+    { status: 201 },
+  );
 }

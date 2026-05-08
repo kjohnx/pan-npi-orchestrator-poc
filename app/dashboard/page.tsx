@@ -29,6 +29,11 @@ type FlagDetail = {
   status: string;
 };
 
+type ComponentSku = {
+  sku_id: string;
+  name: string;
+};
+
 type Entitlement = {
   entitlement_id: string;
   account_id: string;
@@ -43,7 +48,7 @@ type Entitlement = {
   constraints: Record<string, ConstraintValue>;
   provisioning_status: string;
   sku_constraint_definitions: ConstraintDefinition[];
-  component_sku_ids: string[];
+  component_skus: ComponentSku[];
   activated_flag_details: FlagDetail[];
   locked_flag_details: FlagDetail[];
 };
@@ -285,13 +290,13 @@ export default function DashboardPage() {
                   <section>
                     <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-gray-700">Includes</h3>
                     <div className="flex flex-wrap gap-2">
-                      {entitlement.component_sku_ids.length > 0 ? (
-                        entitlement.component_sku_ids.map((componentSkuId) => (
+                      {entitlement.component_skus.length > 0 ? (
+                        entitlement.component_skus.map((component) => (
                           <span
-                            key={`${entitlement.entitlement_id}-${componentSkuId}`}
+                            key={`${entitlement.entitlement_id}-${component.sku_id}`}
                             className="inline-flex rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700"
                           >
-                            {componentSkuId}
+                            {component.name}
                           </span>
                         ))
                       ) : (

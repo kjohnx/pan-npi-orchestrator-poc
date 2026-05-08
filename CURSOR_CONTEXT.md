@@ -42,6 +42,21 @@ integrated terminal, when you need outbound network access (Anthropic API, `fetc
 `api.anthropic.com`, etc.). Cursor’s sandboxed terminal can block or fail DNS/network for
 those calls; the Mac host terminal matches how you will demo the panel.
 
+IMPORTANT: `npm run dev` must always be run from Mac terminal or standard terminal, not
+Cursor's integrated terminal. Cursor's sandbox blocks outbound network calls to
+`api.anthropic.com`.
+
+### `.env.local` requirements
+
+`.env.local` requires two entries:
+
+```bash
+ANTHROPIC_API_KEY=your_key
+CHOKIDAR_USEPOLLING=false
+```
+
+`CHOKIDAR_USEPOLLING=false` prevents EMFILE errors on Mac.
+
 ---
 
 ## Project File Structure
@@ -242,19 +257,43 @@ Do not wrap the JSON in markdown code fences. Return raw JSON only with no backt
   ACTIVE entitlements for this SKU to reflect the new constraint values.
 
 ### `/api/entitlements` (GET, POST)
-- GET: requires `?account_id=ACC-001`. Returns entitlements joined with SKU and product name,
-  **`account_tier`** from `customer_accounts.tier`, the SKU’s **`sku_pricing_model`** and
-  **`sku_freemium_limit`** (from `skus`), **`is_bundle`** (from `skus`), parsed JSON fields
-  (not raw strings), plus:
-  - **`activated_flag_details`**: array of active flag objects `{ flag_id, display_name, status }`
-  - **`locked_flag_details`**: array of active flag objects `{ flag_id, display_name, status }`
-  - Flag detail arrays are filtered to `feature_flags.status = 'ACTIVE'` (deprecated flags hidden)
+- GET: requires `?account_id=ACC-001`. Returns these fields per entitlement:
+  - `entitlement_id`
+  - `account_id`
+  - `sku_id`
+  - `sku_name`
+  - `product_id`
+  - `product_name`
+  - `is_bundle`
+  - `component_skus` (array of `{ sku_id, name }` — resolved from `component_sku_ids` for
+    bundles, empty array for non-bundles)
+  - `pricing_model`
+  - `status`
+  - `start_date`
+  - `end_date`
+  - `constraints` (parsed JSON)
+  - `activated_flags` (parsed JSON)
+  - `locked_flags` (parsed JSON)
+  - `provisioning_status`
+  - `account_tier`
+  - `sku_pricing_model`
+  - `sku_freemium_limit`
+  - `activated_flag_details` (array of `{ flag_id, display_name, status }` — only ACTIVE flags)
+  - `locked_flag_details` (array of `{ flag_id, display_name, status }` — only ACTIVE flags)
 - POST: create a new entitlement. Auto-set `activated_flags` from SKU's `required_flags`.
   Auto-set `locked_flags` from SKU's `optional_flags`.
   - Supports explicit `activated_flags` / `locked_flags` in request body (used by NPI
     Published-tab provisioning flow).
   - Duplicate protection: if an **ACTIVE** entitlement already exists for the same
     `account_id + sku_id`, return **`409`** with `{ "error": "duplicate" }`.
+  - POST handler checks for duplicate ACTIVE entitlements on the same `account_id + sku_id`
+    and returns `409 { error: 'duplicate' }` if found.
+
+#### `component_skus` resolver note
+
+In `app/api/entitlements/route.ts`, bundle entitlements resolve `component_sku_ids` to names by
+querying the `skus` table once for all bundle component IDs and building an ID→name map.
+Non-bundle entitlements return `component_skus: []`.
 
 ### `/api/entitlements/[id]` (PATCH)
 - Update `status`, `constraints`, `activated_flags`, `locked_flags`, or
@@ -362,11 +401,17 @@ on the Published tab and returns the user to the Review tab in PATCH mode.
   rendered as a readable table (key, label, type, unit, required)
 - **Provision to Account** section appears below the published summary:
   - Label: **Provision this SKU to a customer account**
-  - Account dropdown with known accounts (`ACC-001`, `ACC-002`, `ACC-003`)
+  - Account dropdown with known accounts (`ACC-001`, `ACC-002`, `ACC-003`), defaulting to
+    `ACC-001`
   - **Provision** button posts to `POST /api/entitlements` with selected account + published SKU
-  - Request payload includes `status`, date window, constraints generated from
-    `constraint_definitions`, and copied `required_flags`/`optional_flags`
-  - On success: green confirmation with link to **Customer Dashboard** (`/dashboard`)
+  - Request payload includes:
+    - `status: "ACTIVE"`
+    - `start_date`: today (`YYYY-MM-DD`)
+    - `end_date`: one year from today (`YYYY-MM-DD`) or `null` if `pricing_model` is `FREEMIUM`
+    - `constraints`: auto-built from SKU `constraint_definitions`
+    - `activated_flags`: copied from `required_flags`
+    - `locked_flags`: copied from `optional_flags`
+  - On success: green confirmation with clickable link to **Customer Dashboard** (`/dashboard`)
   - On duplicate (`409 { error: "duplicate" }`): yellow warning that account already has
     an active entitlement for that SKU
   - Section remains usable after success for provisioning to additional accounts
@@ -474,7 +519,8 @@ Never show flags with `status=INACTIVE`.
 
 Bundle-card behavior:
 - hide Feature Flags section entirely (flags are product-level)
-- show an **Includes** section with `component_sku_ids` as pill badges
+- show an **Includes** section with resolved component SKU names as pill badges
+- INCLUDES pills display `component.name` sourced from the resolved `component_skus` array
 
 ### API Requirement
 
@@ -483,7 +529,7 @@ activated and locked flags.
 
 Current implementation: `app/api/entitlements/route.ts` returns
 `activated_flag_details` and `locked_flag_details` by joining `feature_flags`.
-It also returns `is_bundle` and parsed `component_sku_ids` from the SKU row.
+It also returns `is_bundle` and resolved `component_skus` from the SKU row.
 
 ### Empty State
 
@@ -500,14 +546,28 @@ entitlement states.
 
 ---
 
-## Demo Flow (for reference — do not build UI for this, just keep it in mind)
+## Demo Flow (end-to-end)
 
-1. Panel opens dashboard → ACC-001 → sees Cortex Shield at 3.2/5GB (near freemium cap)
-2. Switch to NPI tool → **Input** tab → product concept → **Generate Schema** → **Review** tab
-3. AI fills form → review → Publish
-4. Panel says: "Make it Freemium — first 5GB free"
-5. Modify SKU → change to FREEMIUM, set freemium_limit=5 → re-publish
-6. Switch back to dashboard → ACC-001 → usage bar and freemium badge now reflect the change
+1. Open dashboard → select `ACC-001` → note Cortex Shield Freemium at `3.2/5 GB` amber warning meter
+2. Switch to NPI tool → Input tab → pre-filled concept text → click **Generate Schema**
+3. Review tab → verify AI-parsed form fields → click **Preview Impact** → expand drill-down table showing per-account impact reasons
+4. Click **Publish SKU** → Published tab shows SKU summary
+5. Select `ACC-003` from account dropdown → click **Provision** → success message with Customer Dashboard link
+6. Click Customer Dashboard link → switch to `ACC-003` → new entitlement card appears
+7. Return to NPI tool → click **Modify SKU** → change `pricing_model` to `FREEMIUM` and set `freemium_limit` to `5` → click **Re-publish** → provision to `ACC-001` → dashboard shows freemium meter
+
+---
+
+## Demo Reset
+
+To restore the database to clean seed state before a demo, delete the SQLite file and restart:
+
+```bash
+rm data/npi_orchestrator.db
+npm run dev
+```
+
+Schema and seed data are recreated automatically.
 
 ---
 

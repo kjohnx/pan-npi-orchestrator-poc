@@ -1,71 +1,172 @@
-# NPI Orchestrator (Demo POC)
+# NPI Orchestrator — Demo POC
 
-`npi-orchestrator` is a Next.js demo application for Palo Alto Networks that models a common product operations problem: translating new product packaging ideas into structured SKUs quickly, then reflecting the impact on downstream customer entitlements.
+A Next.js proof-of-concept for Palo Alto Networks demonstrating an
+AI-assisted NPI-to-provisioning pipeline. Built as part of a
+Principal PM case study.
 
-The POC is intentionally lightweight and local-first. It is designed for demoability and clarity, not production scale.
+This POC shows how plain-English product concepts can be automatically
+parsed into structured SKU schemas, published to a licensing system,
+provisioned to customer accounts, and immediately reflected on a
+customer-facing entitlement dashboard — end to end.
+
+---
 
 ## Business Problem
 
-NPI teams often start from plain-English product concepts, while downstream systems need structured contract and entitlement data. This creates friction between:
+NPI teams define products in plain English. Downstream systems need
+structured SKU definitions, entitlement rules, and feature flag states.
+The manual translation between these two worlds takes 6+ weeks and
+creates launch delays.
 
-- New SKU definition and review
-- Entitlement provisioning and feature-flag state
-- Customer visibility into usage limits and locked vs active capabilities
+This POC demonstrates the automation layer that closes that gap.
 
-This project demonstrates an end-to-end flow that closes that gap with AI-assisted parsing and a simple entitlement model.
+---
 
-## Prototypes
+## What's Covered
 
-### 1) NPI Fast-Track Tool (`/app/npi`)
+### Use Case 1 — AI-Assisted SKU Creation
+Define a new product in plain English. The system uses Claude AI to
+parse it into a structured SKU schema including pricing model, unit,
+feature flags, and constraint definitions. The NPI team reviews and
+edits before publishing.
 
-Internal workflow for defining and publishing SKUs:
+### Use Case 2 — Customer Impact Analysis
+Before publishing, preview which customer accounts are affected by the
+new SKU and why — with per-account specific impact reasons based on
+their current entitlement state.
 
-- Accepts a plain-English product concept
-- Calls an API route backed by Anthropic Claude to parse it into SKU schema JSON
-- Lets NPI users review/edit fields before publishing
-- Supports post-publish SKU modification (e.g., freemium pivot) and entitlement impact
+### Use Case 3 — Live SKU Modification (Freemium Pivot)
+After publishing, modify the SKU — for example, switching from
+usage-based to freemium pricing with a free tier limit. The system
+shows how the change propagates to existing entitlements.
 
-### 2) Customer Entitlement Dashboard (`/app/dashboard`)
+### Use Case 4 — Customer Entitlement Provisioning
+After publishing a SKU, provision it directly to a customer account.
+Constraints, flags, and contract dates are auto-populated from the
+SKU definition.
 
-Customer-facing entitlement view:
+### Use Case 5 — Customer Dashboard
+Customers see their active entitlements with dynamic usage meters,
+feature flag states (Active vs Locked), freemium caps, and contract
+dates — all driven by the SKU's constraint definitions without
+hardcoded field names.
 
-- Account-level entitlement cards
-- Dynamic usage meters driven by SKU `constraint_definitions`
-- Feature flag state shown as Active vs Locked
-- Hides deprecated (`INACTIVE`) feature flags
+---
+
+## Two Prototypes
+
+### NPI Fast-Track Tool (`/npi`)
+Internal tool for the NPI/Ops team. Dark theme. Three-tab workflow:
+
+- **Input tab** — paste a plain-English product concept
+- **Review tab** — AI-parsed SKU form, editable before publish.
+  Includes Preview Impact drill-down showing affected accounts
+  and per-account impact reasons
+- **Published tab** — published SKU summary with provision-to-account
+  selector and link to customer dashboard
+
+### Customer Entitlement Dashboard (`/dashboard`)
+Customer-facing portal. Light theme. Shows:
+
+- Entitlement cards per product with status badges
+- Dynamic usage meters from SKU constraint definitions
+- Feature flag tiles (Active green / Locked gray)
+- Freemium usage bars with near-cap warning colors
+- Bundle entitlements showing component product names
+
+---
 
 ## Tech Stack
 
 - Next.js 14 (App Router, TypeScript)
 - Tailwind CSS
-- SQLite (`better-sqlite3`) at `data/npi_orchestrator.db`
-- Anthropic Claude API (`claude-sonnet-4-20250514`) for NPI schema parsing
-- Local development in Cursor
+- SQLite via `better-sqlite3` — file at `data/npi_orchestrator.db`
+- Anthropic Claude API (`claude-sonnet-4-5`) for NPI schema parsing
+- No external database required — fully local
+
+---
 
 ## Run Locally
 
-1. Install dependencies:
+### Prerequisites
+- Node.js 18+
+- An Anthropic API key (required for the AI parsing feature)
+  Get one at: https://console.anthropic.com
+
+### Setup
+
+1. Clone the repository:
+
+```bash
+git clone https://github.com/kjohnx/pan-npi-orchestrator-poc.git
+cd pan-npi-orchestrator-poc
+```
+
+2. Install dependencies:
 
 ```bash
 npm install
 ```
 
-2. Create `.env.local` in the project root:
+3. Create `.env.local` in the project root:
 
-```bash
+```
 ANTHROPIC_API_KEY=your_anthropic_api_key_here
+CHOKIDAR_USEPOLLING=false
 ```
 
-The key is required for the NPI parsing flow (`/api/npi-parse`).
-
-3. Start the dev server:
+4. Start the dev server from your terminal:
 
 ```bash
 npm run dev
 ```
 
-4. Open the app:
+> **Important:** Run `npm run dev` from a standard terminal
+> (Terminal.app, iTerm, etc.), not from within a sandboxed IDE
+> terminal. Some IDE terminals restrict outbound network calls
+> which will prevent the Anthropic API from working.
 
-- [http://localhost:3000](http://localhost:3000)
+5. Open the app:
 
-On first DB access, the app initializes SQLite schema and seed data automatically via `lib/db/client.ts`.
+- NPI Fast-Track Tool: http://localhost:3000/npi
+- Customer Dashboard: http://localhost:3000/dashboard
+
+The SQLite database is created automatically on first run and
+seeded with demo data (3 accounts, 5 SKUs, 6 entitlements).
+
+### Reset Demo Data
+
+To restore the database to its original seed state before a demo:
+
+```bash
+rm data/npi_orchestrator.db
+```
+
+Then restart the dev server. The database will be recreated
+automatically from the seed.
+
+---
+
+## Demo Accounts
+
+| Account ID | Company | Tier |
+|------------|---------|------|
+| ACC-001 | Acme Financial Services | ENTERPRISE |
+| ACC-002 | Globex Healthcare | MID-MARKET |
+| ACC-003 | Initech Manufacturing | SMB |
+
+ACC-001 is the primary demo account — it has a Cortex Shield
+freemium entitlement near its usage cap (3.2/5 GB) which renders
+as an amber warning meter on the dashboard.
+
+---
+
+## Notes
+
+- This is a demo POC — not production code
+- The Anthropic API key is required only for the Generate Schema
+  feature in the NPI tool. All other features work without it
+- New SKUs and entitlements created during a session are stored in
+  the local SQLite database and persist until reset
+- Built using Cursor AI-assisted development as part of demonstrating
+  AI pragmatism in PM practice
