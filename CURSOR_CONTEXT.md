@@ -251,6 +251,10 @@ Do not wrap the JSON in markdown code fences. Return raw JSON only with no backt
   - Flag detail arrays are filtered to `feature_flags.status = 'ACTIVE'` (deprecated flags hidden)
 - POST: create a new entitlement. Auto-set `activated_flags` from SKU's `required_flags`.
   Auto-set `locked_flags` from SKU's `optional_flags`.
+  - Supports explicit `activated_flags` / `locked_flags` in request body (used by NPI
+    Published-tab provisioning flow).
+  - Duplicate protection: if an **ACTIVE** entitlement already exists for the same
+    `account_id + sku_id`, return **`409`** with `{ "error": "duplicate" }`.
 
 ### `/api/entitlements/[id]` (PATCH)
 - Update `status`, `constraints`, `activated_flags`, `locked_flags`, or
@@ -356,6 +360,16 @@ on the Published tab and returns the user to the Review tab in PATCH mode.
 **Tab 3 — Published**
 - Published SKU summary (ids, pricing, flags, version, etc.) and **constraint_definitions**
   rendered as a readable table (key, label, type, unit, required)
+- **Provision to Account** section appears below the published summary:
+  - Label: **Provision this SKU to a customer account**
+  - Account dropdown with known accounts (`ACC-001`, `ACC-002`, `ACC-003`)
+  - **Provision** button posts to `POST /api/entitlements` with selected account + published SKU
+  - Request payload includes `status`, date window, constraints generated from
+    `constraint_definitions`, and copied `required_flags`/`optional_flags`
+  - On success: green confirmation with link to **Customer Dashboard** (`/dashboard`)
+  - On duplicate (`409 { error: "duplicate" }`): yellow warning that account already has
+    an active entitlement for that SKU
+  - Section remains usable after success for provisioning to additional accounts
 - **Modify SKU** → Review tab in PATCH mode for the freemium pivot demo (`FREEMIUM`,
   `freemium_limit`, etc.)
 
@@ -418,6 +432,7 @@ One card per entitlement showing:
 - product name and SKU name as card title
   - for bundle SKUs (`is_bundle = 1` / `product_id = null`), use `Bundle` as the product label
     instead of `Unknown Product`
+  - bundle cards show `Bundle - <SKU Name>` title format
 - status badge:
   - `ACTIVE` green
   - `PENDING` yellow
@@ -450,12 +465,16 @@ must be visually prominent.
 
 ### Feature Flags
 
-Grid of tiles per flag:
+Non-bundle cards render a Feature Flags grid:
 - green `Active` for `activated_flag_details`
 - gray `Locked 🔒` for `locked_flag_details`
 
 Show `display_name` from the `feature_flags` table.
 Never show flags with `status=INACTIVE`.
+
+Bundle-card behavior:
+- hide Feature Flags section entirely (flags are product-level)
+- show an **Includes** section with `component_sku_ids` as pill badges
 
 ### API Requirement
 
@@ -464,6 +483,7 @@ activated and locked flags.
 
 Current implementation: `app/api/entitlements/route.ts` returns
 `activated_flag_details` and `locked_flag_details` by joining `feature_flags`.
+It also returns `is_bundle` and parsed `component_sku_ids` from the SKU row.
 
 ### Empty State
 

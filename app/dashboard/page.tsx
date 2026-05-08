@@ -43,6 +43,7 @@ type Entitlement = {
   constraints: Record<string, ConstraintValue>;
   provisioning_status: string;
   sku_constraint_definitions: ConstraintDefinition[];
+  component_sku_ids: string[];
   activated_flag_details: FlagDetail[];
   locked_flag_details: FlagDetail[];
 };
@@ -171,6 +172,10 @@ export default function DashboardPage() {
                 key={entitlement.entitlement_id}
                 className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm"
               >
+                {(() => {
+                  const isBundleCard = entitlement.is_bundle === 1;
+                  return (
+                    <>
                 <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
                   <div>
                     {/** Bundle SKUs have null product_id and should render as "Bundle" in title. */}
@@ -276,29 +281,52 @@ export default function DashboardPage() {
                   </div>
                 </section>
 
-                <section>
-                  <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-gray-700">Feature Flags</h3>
-                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                    {entitlement.activated_flag_details.map((flag) => (
-                      <div
-                        key={`${entitlement.entitlement_id}-active-${flag.flag_id}`}
-                        className="rounded-lg border border-green-200 bg-green-50 px-3 py-2"
-                      >
-                        <p className="text-sm font-medium text-green-900">{flag.display_name}</p>
-                        <p className="text-xs font-semibold uppercase tracking-wide text-green-700">Active</p>
-                      </div>
-                    ))}
-                    {entitlement.locked_flag_details.map((flag) => (
-                      <div
-                        key={`${entitlement.entitlement_id}-locked-${flag.flag_id}`}
-                        className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2"
-                      >
-                        <p className="text-sm font-medium text-gray-800">{flag.display_name}</p>
-                        <p className="text-xs font-semibold uppercase tracking-wide text-gray-600">Locked 🔒</p>
-                      </div>
-                    ))}
-                  </div>
-                </section>
+                {isBundleCard ? (
+                  <section>
+                    <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-gray-700">Includes</h3>
+                    <div className="flex flex-wrap gap-2">
+                      {entitlement.component_sku_ids.length > 0 ? (
+                        entitlement.component_sku_ids.map((componentSkuId) => (
+                          <span
+                            key={`${entitlement.entitlement_id}-${componentSkuId}`}
+                            className="inline-flex rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700"
+                          >
+                            {componentSkuId}
+                          </span>
+                        ))
+                      ) : (
+                        <p className="text-sm text-gray-500">No component SKUs listed for this bundle.</p>
+                      )}
+                    </div>
+                  </section>
+                ) : (
+                  <section>
+                    <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-gray-700">Feature Flags</h3>
+                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                      {entitlement.activated_flag_details.map((flag) => (
+                        <div
+                          key={`${entitlement.entitlement_id}-active-${flag.flag_id}`}
+                          className="rounded-lg border border-green-200 bg-green-50 px-3 py-2"
+                        >
+                          <p className="text-sm font-medium text-green-900">{flag.display_name}</p>
+                          <p className="text-xs font-semibold uppercase tracking-wide text-green-700">Active</p>
+                        </div>
+                      ))}
+                      {entitlement.locked_flag_details.map((flag) => (
+                        <div
+                          key={`${entitlement.entitlement_id}-locked-${flag.flag_id}`}
+                          className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2"
+                        >
+                          <p className="text-sm font-medium text-gray-800">{flag.display_name}</p>
+                          <p className="text-xs font-semibold uppercase tracking-wide text-gray-600">Locked 🔒</p>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                )}
+                    </>
+                  );
+                })()}
               </article>
             ))}
           </div>

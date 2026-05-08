@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useMemo, useState } from "react";
 
 const DEFAULT_CONCEPT =
@@ -18,6 +19,12 @@ const FLAG_OPTIONS = [
   { id: "auto-remediation", label: "Auto Remediation" },
   { id: "dlp-inline", label: "DLP Inline" },
   { id: "saas-visibility", label: "SaaS Visibility" },
+] as const;
+
+const ACCOUNT_OPTIONS = [
+  { id: "ACC-001", company: "Acme Financial Services", tier: "ENTERPRISE" },
+  { id: "ACC-002", company: "Globex Healthcare", tier: "MID-MARKET" },
+  { id: "ACC-003", company: "Initech Manufacturing", tier: "SMB" },
 ] as const;
 
 type ConstraintDefinition = {
@@ -202,6 +209,10 @@ export default function NpiPage() {
   const [rawAiOutput, setRawAiOutput] = useState<string | null>(null);
   const [isRawOpen, setIsRawOpen] = useState(false);
   const [hasGeneratedSchema, setHasGeneratedSchema] = useState(false);
+  const [provisionAccountId, setProvisionAccountId] = useState<string>("ACC-001");
+  const [isProvisioning, setIsProvisioning] = useState(false);
+  const [provisionSuccessCompany, setProvisionSuccessCompany] = useState<string | null>(null);
+  const [provisionWarning, setProvisionWarning] = useState<string>("");
 
   const selectedProductName = useMemo(() => {
     return products.find((product) => product.product_id === productId)?.name ?? null;
@@ -418,6 +429,73 @@ export default function NpiPage() {
       setError(publishError instanceof Error ? publishError.message : "Unexpected publish error.");
     } finally {
       setIsPublishing(false);
+    }
+  }
+
+  function formatYyyyMmDd(date: Date): string {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
+
+  async function handleProvisionToAccount() {
+    if (!publishedSku) return;
+
+    setError("");
+    setProvisionWarning("");
+    setProvisionSuccessCompany(null);
+    setIsProvisioning(true);
+
+    try {
+      const today = new Date();
+      const oneYearFromToday = new Date(today);
+      oneYearFromToday.setFullYear(oneYearFromToday.getFullYear() + 1);
+
+      const isFreemium = normalizePricingModel(publishedSku.pricing_model) === "FREEMIUM";
+      const constraints = Object.fromEntries(
+        publishedSku.constraint_definitions.map((definition) => [
+          definition.key,
+          {
+            limit: null,
+            freemium_limit: publishedSku.freemium_limit ?? null,
+            current_value: 0,
+          },
+        ]),
+      );
+
+      const response = await fetch("/api/entitlements", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          account_id: provisionAccountId,
+          sku_id: publishedSku.sku_id,
+          status: "ACTIVE",
+          start_date: formatYyyyMmDd(today),
+          end_date: isFreemium ? null : formatYyyyMmDd(oneYearFromToday),
+          constraints,
+          activated_flags: publishedSku.required_flags,
+          locked_flags: publishedSku.optional_flags,
+        }),
+      });
+
+      const json = (await response.json()) as { error?: string };
+      if (response.status === 409 && json.error === "duplicate") {
+        setProvisionWarning("This account already has an active entitlement for this SKU.");
+        return;
+      }
+      if (!response.ok) {
+        throw new Error(json.error ?? "Provisioning failed.");
+      }
+
+      const companyName =
+        ACCOUNT_OPTIONS.find((account) => account.id === provisionAccountId)?.company ?? provisionAccountId;
+      setProvisionSuccessCompany(companyName);
+      setProvisionAccountId("ACC-001");
+    } catch (provisionError) {
+      setError(provisionError instanceof Error ? provisionError.message : "Provisioning failed.");
+    } finally {
+      setIsProvisioning(false);
     }
   }
 
@@ -987,6 +1065,46 @@ export default function NpiPage() {
                     </tbody>
                   </table>
                 </div>
+              </div>
+
+              <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-5">
+                <p className="mb-3 text-sm font-medium text-slate-200">Provision this SKU to a customer account</p>
+                <div className="flex flex-col gap-3 md:flex-row md:items-center">
+                  <select
+                    value={provisionAccountId}
+                    onChange={(event) => setProvisionAccountId(event.target.value)}
+                    className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none ring-blue-500 focus:ring-2 md:max-w-lg"
+                  >
+                    {ACCOUNT_OPTIONS.map((account) => (
+                      <option key={account.id} value={account.id}>
+                        {account.id} {account.company} ({account.tier})
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={handleProvisionToAccount}
+                    disabled={isProvisioning}
+                    className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {isProvisioning ? "Provisioning..." : "Provision"}
+                  </button>
+                </div>
+
+                {provisionSuccessCompany && (
+                  <div className="mt-4 rounded-lg border border-emerald-700/40 bg-emerald-950/40 px-4 py-3 text-sm text-emerald-200">
+                    SKU successfully provisioned to {provisionSuccessCompany}. View it on the{" "}
+                    <Link href="/dashboard" className="font-semibold text-emerald-100 underline underline-offset-2">
+                      Customer Dashboard
+                    </Link>
+                    .
+                  </div>
+                )}
+                {provisionWarning && (
+                  <div className="mt-4 rounded-lg border border-amber-700/40 bg-amber-950/40 px-4 py-3 text-sm text-amber-200">
+                    {provisionWarning}
+                  </div>
+                )}
               </div>
 
               <div className="flex justify-end">

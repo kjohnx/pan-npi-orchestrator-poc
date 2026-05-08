@@ -23,6 +23,7 @@ type EntitlementRow = {
   provisioning_status: string;
   created_at: string;
   sku_constraint_definitions: string;
+  component_sku_ids: string;
 };
 
 type FeatureFlagRow = {
@@ -38,6 +39,8 @@ type CreateEntitlementBody = {
   start_date?: string | null;
   end_date?: string | null;
   constraints?: Record<string, unknown>;
+  activated_flags?: string[];
+  locked_flags?: string[];
   provisioning_status?: string;
 };
 
@@ -45,6 +48,7 @@ const ENTITLEMENT_QUERY = `
   SELECT
     e.entitlement_id, e.account_id, a.company_name as account_name, a.tier as account_tier, e.sku_id,
     s.name as sku_name, s.is_bundle, s.pricing_model as sku_pricing_model, s.freemium_limit as sku_freemium_limit,
+    s.component_sku_ids,
     s.product_id, p.name as product_name,
     e.status, e.start_date, e.end_date, e.constraints, e.activated_flags,
     e.locked_flags, e.provisioning_status, e.created_at,
@@ -67,6 +71,7 @@ function mapEntitlement(
     activated_flags: activatedFlags,
     locked_flags: lockedFlags,
     sku_constraint_definitions: parseJson<unknown[]>(row.sku_constraint_definitions, []),
+    component_sku_ids: parseJson<string[]>(row.component_sku_ids, []),
     activated_flag_details: getFlags(JSON.stringify(activatedFlags)),
     locked_flag_details: getFlags(JSON.stringify(lockedFlags)),
   };
@@ -111,6 +116,20 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "SKU not found" }, { status: 404 });
   }
 
+  const duplicate = db
+    .prepare(
+      `
+      SELECT entitlement_id
+      FROM entitlements
+      WHERE account_id = ? AND sku_id = ? AND status = 'ACTIVE'
+      LIMIT 1
+      `,
+    )
+    .get(body.account_id, body.sku_id) as { entitlement_id: string } | undefined;
+  if (duplicate) {
+    return NextResponse.json({ error: "duplicate" }, { status: 409 });
+  }
+
   const entitlementId = toEntitlementId();
   db.prepare(
     `
@@ -130,8 +149,8 @@ export async function POST(request: NextRequest) {
     start_date: body.start_date ?? null,
     end_date: body.end_date ?? null,
     constraints: JSON.stringify(body.constraints ?? {}),
-    activated_flags: JSON.stringify(parseJson<string[]>(sku.required_flags, [])),
-    locked_flags: JSON.stringify(parseJson<string[]>(sku.optional_flags, [])),
+    activated_flags: JSON.stringify(body.activated_flags ?? parseJson<string[]>(sku.required_flags, [])),
+    locked_flags: JSON.stringify(body.locked_flags ?? parseJson<string[]>(sku.optional_flags, [])),
     provisioning_status: body.provisioning_status ?? "PENDING",
   });
 
