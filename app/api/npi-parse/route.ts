@@ -25,7 +25,10 @@ For required_flags and optional_flags, use only these valid flag_ids:
 advanced-heuristics, behavioral-analytics, threat-intel-feed, auto-remediation,
 dlp-inline, saas-visibility
 
-If a field cannot be determined from the input, use null or an empty array.`;
+If a field cannot be determined from the input, use null or an empty array.
+Infer sensible constraint_definitions based on the pricing_model and unit when they are implied by the concept.
+For example: USAGE/FREEMIUM usually needs a numeric usage metric (such as usage_gb), FLAT often uses seat/device/endpoint count, and TIERED should include the tier-driving metric.
+Do not wrap the JSON in markdown code fences. Return raw JSON only with no backticks.`;
 
 type AnthropicResponse = {
   content?: Array<{
@@ -53,7 +56,7 @@ export async function POST(request: NextRequest) {
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-5",
       max_tokens: 1200,
       temperature: 0,
       system: SYSTEM_PROMPT,
@@ -75,15 +78,19 @@ export async function POST(request: NextRequest) {
   }
 
   const data = (await anthropicResp.json()) as AnthropicResponse;
-  const text = data.content?.find((item) => item.type === "text")?.text?.trim();
-  if (!text) {
+  const text = data.content?.find((item) => item.type === "text")?.text ?? "";
+  if (!text.trim()) {
     return NextResponse.json({ error: "No parse output from model" }, { status: 502 });
   }
 
   try {
-    const parsed = JSON.parse(text);
-    return NextResponse.json({ data: parsed });
+    const cleaned = text.replace(/^```json\s*/,'').replace(/^```\s*/,'').replace(/\s*```$/,'').trim();
+    const parsed = JSON.parse(cleaned);
+    return NextResponse.json({ data: parsed, raw: text });
   } catch {
-    return NextResponse.json({ error: "Model returned invalid JSON", raw: text }, { status: 502 });
+    return NextResponse.json(
+      { error: "Model returned invalid JSON", raw: text },
+      { status: 502 },
+    );
   }
 }

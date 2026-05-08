@@ -30,9 +30,16 @@ working, demonstrable functionality — not polish or scale.
 - **Framework:** Next.js 14 (App Router, TypeScript)
 - **Styling:** Tailwind CSS
 - **Database:** SQLite via `better-sqlite3`, file at `/data/npi_orchestrator.db`
-- **AI parsing:** Anthropic Claude API (`claude-sonnet-4-20250514`) — called from a Next.js
+- **AI parsing:** Anthropic Claude API (`claude-sonnet-4-5`) — called from a Next.js
   API route when the NPI user submits a plain-English product concept
-- **Deployment target:** Local (Cursor dev server) — no need to optimize for Vercel serverless
+- **Deployment target:** Local — no need to optimize for Vercel serverless
+
+### Local dev server (important)
+
+Run **`npm run dev` from your Mac terminal** (Terminal.app, iTerm, etc.), not from Cursor’s
+integrated terminal, when you need outbound network access (Anthropic API, `fetch` to
+`api.anthropic.com`, etc.). Cursor’s sandboxed terminal can block or fail DNS/network for
+those calls; the Mac host terminal matches how you will demo the panel.
 
 ---
 
@@ -43,6 +50,8 @@ working, demonstrable functionality — not polish or scale.
 ├── data/
 │   └── npi_orchestrator.db        ← SQLite file, created at runtime, gitignored
 ├── lib/
+│   ├── api/
+│   │   └── utils.ts               ← shared helpers (JSON parsing, ID generators, etc.) for API routes
 │   └── db/
 │       ├── client.ts              ← better-sqlite3 singleton; initializes DB on first run
 │       ├── schema.sql             ← CREATE TABLE statements (provided below)
@@ -176,12 +185,18 @@ the Claude API to return a structured SKU draft.
 ```
 
 **What it does:**
-- Calls `claude-sonnet-4-20250514` with a system prompt that instructs it to return ONLY
-  valid JSON matching the SKU schema (no prose, no markdown fences)
-- The system prompt must include the full SKU schema structure as a reference
-- Returns the parsed JSON to the frontend for display in the review form
+- Calls **`claude-sonnet-4-5`** with a system prompt that instructs it to return ONLY
+  valid JSON matching the SKU schema (no prose; no markdown code fences)
+- The system prompt includes the full SKU schema structure as a reference and instructs
+  Claude to **infer `constraint_definitions` from pricing model and unit** when implied
+  by the concept (e.g. usage metric for USAGE/FREEMIUM, seat/endpoint-style metrics for FLAT,
+  tier-driving metric for TIERED)
+- After the model returns text, the route **strips leading/trailing markdown code fences**
+  (e.g. `` ```json `` … `` ``` ``) before `JSON.parse`, so occasional fenced output still parses
+- Returns **`{ data: <parsed schema>, raw: <original model text> }`** on success so the NPI
+  UI can show a transparent “raw AI” view alongside the parsed form
 
-**System prompt for Claude API (use this exactly):**
+**System prompt for Claude API (canonical copy in `app/api/npi-parse/route.ts`; keep in sync):**
 ```
 You are an NPI schema parser for Palo Alto Networks. When given a plain-English
 product concept, extract the structured fields and return ONLY a valid JSON object.
@@ -209,6 +224,9 @@ advanced-heuristics, behavioral-analytics, threat-intel-feed, auto-remediation,
 dlp-inline, saas-visibility
 
 If a field cannot be determined from the input, use null or an empty array.
+Infer sensible constraint_definitions based on the pricing_model and unit when they are implied by the concept.
+For example: USAGE/FREEMIUM usually needs a numeric usage metric (such as usage_gb), FLAT often uses seat/device/endpoint count, and TIERED should include the tier-driving metric.
+Do not wrap the JSON in markdown code fences. Return raw JSON only with no backticks.
 ```
 
 ### `/api/skus` (GET, POST)
@@ -224,7 +242,8 @@ If a field cannot be determined from the input, use null or an empty array.
 
 ### `/api/entitlements` (GET, POST)
 - GET: requires `?account_id=ACC-001`. Returns entitlements joined with SKU and product name,
-  including all JSON fields parsed (not raw strings).
+  **`account_tier`** from `customer_accounts.tier`, and including all JSON fields parsed
+  (not raw strings).
 - POST: create a new entitlement. Auto-set `activated_flags` from SKU's `required_flags`.
   Auto-set `locked_flags` from SKU's `optional_flags`.
 
@@ -235,29 +254,64 @@ If a field cannot be determined from the input, use null or an empty array.
 ### `/api/products` (GET)
 - Return all products with `available_flags` array parsed, joined with their flag details.
 
+### Shared API helpers (`/lib/api/utils.ts`)
+
+API routes import shared helpers from **`lib/api/utils.ts`** (for example JSON parsing
+helpers and ID generators used by SKU and entitlement routes). Prefer extending this module
+for cross-route utilities rather than duplicating logic.
+
 ---
 
 ## NPI Fast-Track Tool — UI Behavior
 
-**Screen 1 — Input:**
+The NPI tool uses a **3-tab navigation** pattern (not a linear 3-screen wizard). **State is
+preserved** when switching tabs so users can move back to Input or Review without losing
+work. **Gated progression:** Review and Published tabs are visually disabled and non-clickable
+until prerequisites are met — **Review** unlocks after a successful **Generate Schema**;
+**Published** unlocks after **Publish SKU** (first publish). **Modify SKU** (live pivot) lives
+on the Published tab and returns the user to the Review tab in PATCH mode.
+
+**Tab 1 — Input**
 - Large textarea: "Describe your new product concept"
 - Pre-fill with: *"We are launching 'Cortex Shield.' It costs $10/GB, requires a 1-year
   minimum, and needs to toggle the 'Advanced-Heuristics' flag in the firewall."*
-- "Generate Schema" button → calls `/api/npi-parse` → shows loading state
+- "Generate Schema" button → calls `POST /api/npi-parse` → loading state → switches to Review
+  tab with form populated
 
-**Screen 2 — Review:**
+**Tab 2 — Review**
 - Form pre-filled from AI output. All fields editable.
-- Fields: Name, Pricing Model (dropdown), Price per Unit, Currency, Unit, Freemium Limit,
-  Min Commitment, Required Flags (multi-select), Optional Flags (multi-select),
-  Constraint Definitions (add/remove rows)
-- "Preview Impact" button → calls GET /api/entitlements to count affected accounts
-- "Publish SKU" button → calls POST /api/skus → shows success with new sku_id
+- Fields: Name, Product (from `GET /api/products`), Pricing Model (dropdown), Price per Unit,
+  Currency, Unit, Freemium Limit, Min Commitment, Required Flags (multi-select), Optional
+  Flags (multi-select), Constraint Definitions (add/remove rows), Notes
+- **Constraint definitions:** column headers **Key**, **Label**, **Type**, **Unit**,
+  **Required** appear above the row inputs (aligned on md+ layouts). Each header uses a
+  native **`title` tooltip** with this copy:
+  - **Key:** `Internal identifier used in the system, e.g. usage_gb`
+  - **Label:** `Human-readable name shown on customer dashboard, e.g. Data Processed (GB)`
+  - **Type:** `Data type of the constraint value`
+  - **Unit:** `Unit of measurement displayed to customers, e.g. GB, Mbps, Endpoints`
+  - **Required:** `Whether this constraint must be set when provisioning a customer entitlement`
+- **Raw AI Response:** collapsible section (collapsed by default) with toggle **"Show Raw AI
+  Output"**; when expanded, shows the **raw model text** (`raw` from the parse response) in a
+  monospace block before JSON parsing in the route
+- **Preview Impact:** `GET /api/entitlements` for demo accounts (`ACC-001` … `ACC-003`).
+  Shows a summary pill **"N account(s) affected"**; clicking it expands a **scrollable
+  drill-down table** (max-height) with **Account ID**, **Company Name**, **Tier**
+  (`account_tier`), **Affected SKU ID**, and **Impact Reason** text. Only **ACTIVE**
+  entitlements are included; new-SKU preview matches selected **product**; modify-SKU preview
+  matches entitlements for the **published SKU id**.
+- **Impact reason copy:** strings such as *"New SKU for selected product …"* are built in
+  **`deriveImpactReason`** in **`app/npi/page.tsx`** (module-level function; search
+  **`New SKU for selected product`** in the repo to find the exact line). Confirm with
+  stakeholders if this logic should remain client-only or move to an API for consistency.
+- **Publish SKU** → `POST /api/skus` (or **Re-publish** → `PATCH /api/skus/[sku_id]` in modify
+  mode) → Published tab with full summary
 
-**Screen 3 — Post-publish / Live Pivot:**
-- Shows published SKU summary
-- "Modify SKU" button → opens edit form (same as Screen 2 but PATCH mode)
-- This is used for the live demo pivot: change pricing_model to FREEMIUM, set
-  freemium_limit to 5 → re-publish → show impact on entitlements
+**Tab 3 — Published**
+- Published SKU summary (ids, pricing, flags, version, etc.) and **constraint_definitions**
+  rendered as a readable table (key, label, type, unit, required)
+- **Modify SKU** → Review tab in PATCH mode for the freemium pivot demo (`FREEMIUM`,
+  `freemium_limit`, etc.)
 
 ---
 
@@ -283,7 +337,7 @@ If a field cannot be determined from the input, use null or an empty array.
 ## Demo Flow (for reference — do not build UI for this, just keep it in mind)
 
 1. Panel opens dashboard → ACC-001 → sees Cortex Shield at 3.2/5GB (near freemium cap)
-2. Switch to NPI tool → paste product concept → Generate Schema
+2. Switch to NPI tool → **Input** tab → product concept → **Generate Schema** → **Review** tab
 3. AI fills form → review → Publish
 4. Panel says: "Make it Freemium — first 5GB free"
 5. Modify SKU → change to FREEMIUM, set freemium_limit=5 → re-publish
@@ -299,3 +353,5 @@ If a field cannot be determined from the input, use null or an empty array.
 - The `constraints` JSON shape on entitlements varies by product — treat it generically.
 - Keep API routes simple — no auth, no middleware complexity. This is a demo.
 - Use `better-sqlite3` (synchronous) not `sqlite3` (callback-based). All DB calls are sync.
+- For local development that hits Anthropic or other external APIs, run **`npm run dev` from
+  the Mac host terminal**, not Cursor’s integrated terminal (see **Local dev server** above).
