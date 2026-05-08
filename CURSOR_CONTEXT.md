@@ -300,12 +300,51 @@ on the Published tab and returns the user to the Review tab in PATCH mode.
   (`account_tier`), **Affected SKU ID**, and **Impact Reason** text. Only **ACTIVE**
   entitlements are included; new-SKU preview matches selected **product**; modify-SKU preview
   matches entitlements for the **published SKU id**.
-- **Impact reason copy:** per-row reasons for the **new-SKU** preview are built in
-  **`deriveImpactReason`** in **`app/npi/page.tsx`** (module-level function). It compares the
-  entitlement’s **current SKU** pricing model and freemium limit (from the entitlements API)
-  to the **draft** SKU. Search for **`deriveImpactReason`** or strings like
-  **`Currently on Freemium tier`** to find the implementation. **Modify-SKU** preview still uses
-  the aggregated diff-vs-`publishedSku` copy in the same function.
+
+#### Impact reason implementation (`deriveImpactReason`)
+
+- **Location:** `deriveImpactReason` is a **module-level** function in **`app/npi/page.tsx`**
+  (not inside the default page component). Search for `function deriveImpactReason` in that
+  file to open it.
+
+- **Signature (four parameters):**
+  1. **`isModify`** — whether the Review tab is in **Modify SKU** (PATCH) mode.
+  2. **`published`** — the last **`PublishedSku`** from the Published tab, or `null` before
+     first publish / when not modifying.
+  3. **`currentEntitlementSku`** — snapshot `{ pricing_model, freemium_limit }` from the
+     **joined SKU row** for the entitlement row being evaluated (`null` when the modify branch
+     runs so the function does not use it for new-SKU copy).
+  4. **`draft`** — the editable **`SkuDraft`** on the Review tab (the proposed new or updated
+     SKU).
+
+- **`GET /api/entitlements` data used:** each entitlement row includes **`sku_pricing_model`**
+  and **`sku_freemium_limit`** selected from **`skus`** (same values as the entitlement’s
+  current SKU). The UI’s **`ImpactRow`** type mirrors these on each preview row as
+  **`currentSkuPricingModel`** and **`currentSkuFreemiumLimit`** (along with account, tier,
+  `skuId`, and **`impactReason`**).
+
+- **Modify-SKU path** (`isModify === true` and `published` is set): **`currentEntitlementSku`**
+  is ignored. The function returns a **single concatenated message** built from diffs between
+  **`draft`** and **`published`** (pricing model, freemium limit, required/optional flags,
+  constraint definitions), or a generic line if nothing changed.
+
+- **New-SKU path** (otherwise): compares **normalized** current SKU `pricing_model` vs
+  **`draft.pricing_model`** (case-insensitive). It handles these **five** cases:
+
+  1. **FREEMIUM → USAGE** — *Currently on Freemium tier — new SKU switches to usage-based pricing*
+  2. **USAGE → FREEMIUM** — *Currently on paid usage — new SKU adds freemium tier with … free*
+     (uses **`draft.freemium_limit`** and **`draft.unit`** when the limit is numeric; otherwise
+     a fallback line without a numeric cap).
+  3. **Same pricing model** (non-empty, equal after normalization) — *New SKU version
+     available — pricing model unchanged*
+  4. **`currentEntitlementSku` is `null`** — *New product offering — no existing entitlement to
+     migrate* (defensive; normal new-SKU preview rows pass a non-null snapshot from the API).
+  5. **Other model changes** (any remaining mismatch, e.g. FLAT ↔ TIERED) — a short generic line
+     naming **current** vs **draft** pricing models.
+
+  If the current SKU’s `pricing_model` **normalizes to empty** (missing / unusable), the code
+  returns a **separate one-line fallback** (*no pricing model on file*) before falling through
+  to case 5.
 - **Publish SKU** → `POST /api/skus` (or **Re-publish** → `PATCH /api/skus/[sku_id]` in modify
   mode) → Published tab with full summary
 
