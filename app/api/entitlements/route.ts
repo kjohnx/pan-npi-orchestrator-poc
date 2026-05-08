@@ -9,6 +9,7 @@ type EntitlementRow = {
   account_tier: string;
   sku_id: string;
   sku_name: string;
+  is_bundle: number;
   sku_pricing_model: string | null;
   sku_freemium_limit: number | null;
   product_id: string | null;
@@ -24,6 +25,12 @@ type EntitlementRow = {
   sku_constraint_definitions: string;
 };
 
+type FeatureFlagRow = {
+  flag_id: string;
+  display_name: string;
+  status: string;
+};
+
 type CreateEntitlementBody = {
   account_id?: string;
   sku_id?: string;
@@ -37,7 +44,7 @@ type CreateEntitlementBody = {
 const ENTITLEMENT_QUERY = `
   SELECT
     e.entitlement_id, e.account_id, a.company_name as account_name, a.tier as account_tier, e.sku_id,
-    s.name as sku_name, s.pricing_model as sku_pricing_model, s.freemium_limit as sku_freemium_limit,
+    s.name as sku_name, s.is_bundle, s.pricing_model as sku_pricing_model, s.freemium_limit as sku_freemium_limit,
     s.product_id, p.name as product_name,
     e.status, e.start_date, e.end_date, e.constraints, e.activated_flags,
     e.locked_flags, e.provisioning_status, e.created_at,
@@ -48,13 +55,20 @@ const ENTITLEMENT_QUERY = `
   LEFT JOIN products p ON p.product_id = s.product_id
 `;
 
-function mapEntitlement(row: EntitlementRow) {
+function mapEntitlement(
+  row: EntitlementRow,
+  getFlags: (flagIdsJson: string) => FeatureFlagRow[],
+) {
+  const activatedFlags = parseJson<string[]>(row.activated_flags, []);
+  const lockedFlags = parseJson<string[]>(row.locked_flags, []);
   return {
     ...row,
     constraints: parseJson<Record<string, unknown>>(row.constraints, {}),
-    activated_flags: parseJson<string[]>(row.activated_flags, []),
-    locked_flags: parseJson<string[]>(row.locked_flags, []),
+    activated_flags: activatedFlags,
+    locked_flags: lockedFlags,
     sku_constraint_definitions: parseJson<unknown[]>(row.sku_constraint_definitions, []),
+    activated_flag_details: getFlags(JSON.stringify(activatedFlags)),
+    locked_flag_details: getFlags(JSON.stringify(lockedFlags)),
   };
 }
 
@@ -69,7 +83,17 @@ export async function GET(request: NextRequest) {
     .prepare(`${ENTITLEMENT_QUERY} WHERE e.account_id = ? ORDER BY e.created_at DESC`)
     .all(accountId) as EntitlementRow[];
 
-  return NextResponse.json({ data: rows.map(mapEntitlement) });
+  const getFlagsQuery = db.prepare(
+    `
+    SELECT flag_id, display_name, status
+    FROM feature_flags
+    WHERE status = 'ACTIVE' AND flag_id IN (SELECT value FROM json_each(?))
+    ORDER BY display_name ASC
+    `,
+  );
+  const getFlags = (flagIdsJson: string) => getFlagsQuery.all(flagIdsJson) as FeatureFlagRow[];
+
+  return NextResponse.json({ data: rows.map((row) => mapEntitlement(row, getFlags)) });
 }
 
 export async function POST(request: NextRequest) {
@@ -114,5 +138,14 @@ export async function POST(request: NextRequest) {
   const row = db
     .prepare(`${ENTITLEMENT_QUERY} WHERE e.entitlement_id = ?`)
     .get(entitlementId) as EntitlementRow | undefined;
-  return NextResponse.json({ data: row ? mapEntitlement(row) : null }, { status: 201 });
+  const getFlagsQuery = db.prepare(
+    `
+    SELECT flag_id, display_name, status
+    FROM feature_flags
+    WHERE status = 'ACTIVE' AND flag_id IN (SELECT value FROM json_each(?))
+    ORDER BY display_name ASC
+    `,
+  );
+  const getFlags = (flagIdsJson: string) => getFlagsQuery.all(flagIdsJson) as FeatureFlagRow[];
+  return NextResponse.json({ data: row ? mapEntitlement(row, getFlags) : null }, { status: 201 });
 }

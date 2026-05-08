@@ -10,7 +10,8 @@ Read this before writing any code. This is the full context for what we are buil
 
 ## What We Are Building
 
-A Next.js application called **npi-orchestrator** with two functional prototypes:
+A Next.js application called **npi-orchestrator** with two functional prototypes.
+Both prototypes are now complete and demo-ready:
 
 1. **NPI Fast-Track Tool** (`/app/npi`) — internal tool used by the NPI team to define a new
    product in plain English, have AI parse it into a structured SKU schema, review/edit the
@@ -243,7 +244,11 @@ Do not wrap the JSON in markdown code fences. Return raw JSON only with no backt
 ### `/api/entitlements` (GET, POST)
 - GET: requires `?account_id=ACC-001`. Returns entitlements joined with SKU and product name,
   **`account_tier`** from `customer_accounts.tier`, the SKU’s **`sku_pricing_model`** and
-  **`sku_freemium_limit`** (from `skus`), and including all JSON fields parsed (not raw strings).
+  **`sku_freemium_limit`** (from `skus`), **`is_bundle`** (from `skus`), parsed JSON fields
+  (not raw strings), plus:
+  - **`activated_flag_details`**: array of active flag objects `{ flag_id, display_name, status }`
+  - **`locked_flag_details`**: array of active flag objects `{ flag_id, display_name, status }`
+  - Flag detail arrays are filtered to `feature_flags.status = 'ACTIVE'` (deprecated flags hidden)
 - POST: create a new entitlement. Auto-set `activated_flags` from SKU's `required_flags`.
   Auto-set `locked_flags` from SKU's `optional_flags`.
 
@@ -372,6 +377,106 @@ on the Published tab and returns the user to the Review tab in PATCH mode.
     Do not show flags with status=INACTIVE.
 - When ACC-001 is selected and the freemium Cortex Shield entitlement is shown,
   the usage bar should visually show 3.2/5 GB with a warning color (near cap).
+
+---
+
+## Customer Entitlement Dashboard
+
+### Theme and Purpose
+
+Light theme customer-facing portal.
+- `bg-gray-50` page background
+- white cards
+- dark text
+- `blue-600` accents matching NPI tool buttons
+
+The dashboard should be visually distinct from the dark internal NPI tool to represent
+two different personas: internal ops vs external customer.
+
+### Route
+
+`app/dashboard/page.tsx`
+
+### Header
+
+- Title: `Customer Portal`
+- Subtitle: `Your active products and entitlements`
+- PAN branding in light styling
+
+### Account Selector
+
+- Dropdown at top defaulting to `ACC-001`
+- Hardcoded to three known accounts:
+  - `ACC-001` Acme Financial Services (`ENTERPRISE`)
+  - `ACC-002` Globex Healthcare (`MID-MARKET`)
+  - `ACC-003` Initech Manufacturing (`SMB`)
+- On change, fetches: `GET /api/entitlements?account_id={id}`
+
+### Entitlement Cards
+
+One card per entitlement showing:
+- product name and SKU name as card title
+  - for bundle SKUs (`is_bundle = 1` / `product_id = null`), use `Bundle` as the product label
+    instead of `Unknown Product`
+- status badge:
+  - `ACTIVE` green
+  - `PENDING` yellow
+  - `SUSPENDED` red
+  - `INACTIVE` gray
+- contract start and end dates formatted as readable dates
+  - show `No expiry` if `end_date` is `null`
+- provisioning status indicator
+
+### Usage Meters
+
+Dynamically rendered from the SKU's `constraint_definitions` array — never hardcode
+field names like `usage_gb`.
+
+For each constraint definition:
+- render a labeled progress bar showing `current_value` vs `limit`
+- use `freemium_limit` if `limit` is `null` and `freemium_limit` exists
+- label comes from `constraint_definitions[n].label`
+- unit comes from `constraint_definitions[n].unit`
+
+Color rules:
+- normal = blue
+- near cap (`>= 80%`) = amber
+- over cap = red
+
+Show `Freemium` badge next to meter label if `freemium_limit` is set.
+
+Key demo moment: `ACC-001` Cortex Shield Freemium shows `3.2/5 GB` (`64%`) in amber —
+must be visually prominent.
+
+### Feature Flags
+
+Grid of tiles per flag:
+- green `Active` for `activated_flag_details`
+- gray `Locked 🔒` for `locked_flag_details`
+
+Show `display_name` from the `feature_flags` table.
+Never show flags with `status=INACTIVE`.
+
+### API Requirement
+
+`GET /api/entitlements` must return flag details (`display_name`, `status`) for both
+activated and locked flags.
+
+Current implementation: `app/api/entitlements/route.ts` returns
+`activated_flag_details` and `locked_flag_details` by joining `feature_flags`.
+
+### Empty State
+
+Show: `No active entitlements found for this account.` if no entitlements returned.
+
+### Demo Flow
+
+Switch account selector from `ACC-001` to `ACC-002` to `ACC-003` to show different
+entitlement states.
+
+`ACC-001` is the primary demo account — it has both:
+- a near-cap freemium Cortex Shield entitlement
+- a large XSIAM deployment
 
 ---
 
