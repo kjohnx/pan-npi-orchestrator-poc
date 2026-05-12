@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useMemo, useState } from "react";
 
 const DEFAULT_CONCEPT =
-  "We are launching AI Access Security. It governs employee use of generative AI tools across the organization. $15 per user per month, 12-month minimum commitment. Enable the Policy Enforcement flag by default, with Shadow AI Detection as an optional add-on.";
+  "We are launching AI Access Security for Enterprise customers. It governs employee use of generative AI tools across the organization. Usage-based pricing at $15 per seat, 12-month minimum commitment. Track licensed seat count as the usage constraint. Enable the Policy Enforcement flag by default, with Shadow AI Detection as an optional add-on.";
 
 const ACCOUNT_IDS = ["ACC-001", "ACC-002", "ACC-003"] as const;
 
@@ -623,7 +623,7 @@ export default function NpiPage() {
             <section className="space-y-7">
               <div className="grid gap-4 md:grid-cols-2">
                 <label className="block">
-                  <span className="mb-2 block text-sm font-medium text-slate-200">Name</span>
+                  <span className="mb-2 block text-sm font-medium text-slate-200">SKU Name</span>
                   <input
                     value={draft.name}
                     onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))}

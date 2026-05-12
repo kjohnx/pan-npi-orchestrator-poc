@@ -198,7 +198,7 @@ the Claude API to return a structured SKU draft.
 
 **Request body:**
 ```json
-{ "concept": "We are launching AI Access Security. It governs employee use of generative AI tools across the organization. $15 per user per month, 12-month minimum commitment. Enable the Policy Enforcement flag by default, with Shadow AI Detection as an optional add-on." }
+{ "concept": "We are launching AI Access Security for Enterprise customers. It governs employee use of generative AI tools across the organization. Usage-based pricing at $15 per seat, 12-month minimum commitment. Track licensed seat count as the usage constraint. Enable the Policy Enforcement flag by default, with Shadow AI Detection as an optional add-on." }
 ```
 
 **What it does:**
@@ -322,13 +322,13 @@ on the Published tab and returns the user to the Review tab in PATCH mode.
 
 **Tab 1 — Input**
 - Large textarea: "Describe your new product concept"
-- Pre-fill with: *"We are launching AI Access Security. It governs employee use of generative AI tools across the organization. $15 per user per month, 12-month minimum commitment. Enable the Policy Enforcement flag by default, with Shadow AI Detection as an optional add-on."*
+- Pre-fill with: *"We are launching AI Access Security for Enterprise customers. It governs employee use of generative AI tools across the organization. Usage-based pricing at $15 per seat, 12-month minimum commitment. Track licensed seat count as the usage constraint. Enable the Policy Enforcement flag by default, with Shadow AI Detection as an optional add-on."*
 - "Generate Schema" button → calls `POST /api/npi-parse` → loading state → switches to Review
   tab with form populated
 
 **Tab 2 — Review**
 - Form pre-filled from AI output. All fields editable.
-- Fields: Name, Product (from `GET /api/products`), Pricing Model (dropdown), Price per Unit,
+- Fields: SKU Name, Product (from `GET /api/products`), Pricing Model (dropdown), Price per Unit,
   Currency, Unit, Freemium Limit, Min Commitment, Required Flags (multi-select), Optional
   Flags (multi-select), Constraint Definitions (add/remove rows), Notes
 - **Constraint definitions:** column headers **Key**, **Label**, **Type**, **Unit**,
@@ -474,10 +474,10 @@ two different personas: internal ops vs external customer.
 ### Entitlement Cards
 
 One card per entitlement showing:
-- product name and SKU name as card title
-  - for bundle SKUs (`is_bundle = 1` / `product_id = null`), use `Bundle` as the product label
-    instead of `Unknown Product`
-  - bundle cards show `Bundle - <SKU Name>` title format
+- card title:
+  - bundle cards (`is_bundle = 1` / `product_id = null`) show `Bundle - <SKU Name>`
+  - non-bundle cards show `Product - SKU Name` unless the product name and SKU name are
+    identical (exact match), in which case show just the SKU name
 - status badge:
   - `ACTIVE` green
   - `PENDING` yellow
@@ -549,7 +549,7 @@ entitlement states.
 ## Demo Flow (end-to-end)
 
 1. Open dashboard → select `ACC-001` → note Cortex Shield Freemium at `3.2/5 GB` amber warning meter
-2. Switch to NPI tool → Input tab → pre-filled AI Access Security concept text → click **Generate Schema**
+2. Switch to NPI tool → Input tab → pre-filled AI Access Security Enterprise concept text → click **Generate Schema**
 3. Review tab → verify AI-parsed form fields → click **Preview Impact** → expand drill-down table showing per-account impact reasons
 4. Click **Publish SKU** → Published tab shows SKU summary
 5. Select `ACC-003` from account dropdown → click **Provision** → success message with Customer Dashboard link
