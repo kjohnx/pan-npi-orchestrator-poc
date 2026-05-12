@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useMemo, useState } from "react";
 
 const DEFAULT_CONCEPT =
-  "We are launching 'Cortex Shield.' It costs $10/GB, requires a 1-year minimum, and needs to toggle the 'Advanced-Heuristics' flag in the firewall.";
+  "We are launching AI Access Security. It governs employee use of generative AI tools across the organization. $15 per user per month, 12-month minimum commitment. Enable the Policy Enforcement flag by default, with Shadow AI Detection as an optional add-on.";
 
 const ACCOUNT_IDS = ["ACC-001", "ACC-002", "ACC-003"] as const;
 
@@ -19,6 +19,8 @@ const FLAG_OPTIONS = [
   { id: "auto-remediation", label: "Auto Remediation" },
   { id: "dlp-inline", label: "DLP Inline" },
   { id: "saas-visibility", label: "SaaS Visibility" },
+  { id: "policy-enforcement", label: "Policy Enforcement" },
+  { id: "shadow-ai-detection", label: "Shadow AI Detection" },
 ] as const;
 
 const ACCOUNT_OPTIONS = [

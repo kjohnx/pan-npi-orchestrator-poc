@@ -1,8 +1,12 @@
 // =============================================================================
 // NPI Orchestrator - Seed Data
 // Run once on first startup if tables are empty.
-// Covers: 3 products, 6 SKUs (incl. 1 bundle, pre/post freemium Cortex Shield),
+// Covers: 4 products, 6 SKUs (incl. 1 bundle, pre/post freemium Cortex Shield),
 //         3 customer accounts, 6 entitlements across varied constraint types.
+//
+// NOTE: PROD-AI-ACCESS-SEC is intentionally seeded with no SKUs or entitlements.
+// It exists as the demo target for the NPI Fast-Track Tool — the default prompt
+// creates the first SKU for this product, making the creation clearly new.
 // =============================================================================
 
 import Database from 'better-sqlite3';
@@ -62,6 +66,23 @@ export function seedDatabase(db: Database.Database) {
       default_state: 'LOCKED',
       status: 'INACTIVE',  // deprecated flag - hidden from new SKUs and UI
     },
+    // -------------------------------------------------------------------------
+    // AI Access Security flags (new product - used in NPI demo)
+    // -------------------------------------------------------------------------
+    {
+      flag_id: 'policy-enforcement',
+      display_name: 'Policy Enforcement',
+      description: 'Enforce acceptable-use policies for generative AI tools in real time',
+      default_state: 'ACTIVE',
+      status: 'ACTIVE',
+    },
+    {
+      flag_id: 'shadow-ai-detection',
+      display_name: 'Shadow AI Detection',
+      description: 'Discover and risk-score unsanctioned AI tools used across the organization',
+      default_state: 'LOCKED',
+      status: 'ACTIVE',
+    },
   ];
 
   const insertFlag = db.prepare(`
@@ -113,6 +134,21 @@ export function seedDatabase(db: Database.Database) {
         'threat-intel-feed',
       ]),
     },
+    // -------------------------------------------------------------------------
+    // AI Access Security — intentionally has NO SKUs seeded.
+    // This is the demo target for the NPI Fast-Track Tool.
+    // -------------------------------------------------------------------------
+    {
+      product_id: 'PROD-AI-ACCESS-SEC',
+      name: 'AI Access Security',
+      description: 'Governs and secures employee use of generative AI tools across the organization',
+      product_line: 'PRISMA',
+      status: 'ACTIVE',
+      available_flags: JSON.stringify([
+        'policy-enforcement',
+        'shadow-ai-detection',
+      ]),
+    },
   ];
 
   const insertProduct = db.prepare(`
@@ -126,12 +162,14 @@ export function seedDatabase(db: Database.Database) {
 
   // --------------------------------------------------------------------------
   // SKUs
-  // Note: Two Cortex Shield SKUs to demonstrate the live freemium pivot:
-  //   SKU-CORTEX-SHIELD-ENT   = standard usage-based, no freemium (pre-pivot)
-  //   SKU-CORTEX-SHIELD-FRM   = freemium tier, 5GB free (post-pivot)
+  // Note: Two Cortex Shield SKUs to demonstrate the live SKU modification demo:
+  //   SKU-CORTEX-SHIELD-ENT   = standard usage-based, no freemium (pre-modification)
+  //   SKU-CORTEX-SHIELD-FRM   = freemium tier, 5GB free (post-modification)
+  //
+  // PROD-AI-ACCESS-SEC has NO SKUs — the NPI Fast-Track demo creates the first one.
   // --------------------------------------------------------------------------
   const skus = [
-    // -- Cortex Shield: Enterprise Usage (pre-pivot SKU) ----------------------
+    // -- Cortex Shield: Enterprise Usage --------------------------------------
     {
       sku_id: 'SKU-CORTEX-SHIELD-ENT',
       product_id: 'PROD-CORTEX-SHIELD',
@@ -159,7 +197,7 @@ export function seedDatabase(db: Database.Database) {
       version: 1,
     },
 
-    // -- Cortex Shield: Freemium (post-pivot SKU - created during live demo) ---
+    // -- Cortex Shield: Freemium ----------------------------------------------
     {
       sku_id: 'SKU-CORTEX-SHIELD-FRM',
       product_id: 'PROD-CORTEX-SHIELD',
@@ -258,8 +296,6 @@ export function seedDatabase(db: Database.Database) {
     },
 
     // -- AI Security Bundle (is_bundle=1) -------------------------------------
-    // Bundles have their own SKU ID, is_bundle=true, product_id=NULL.
-    // Pricing is at bundle level - component SKUs are not individually billed.
     {
       sku_id: 'SKU-AI-SEC-BUNDLE-ENT',
       product_id: null,
@@ -342,9 +378,11 @@ export function seedDatabase(db: Database.Database) {
   // ENTITLEMENTS
   // Each entitlement demonstrates a different constraint shape to show the
   // polymorphic model working across product types.
+  // NOTE: No entitlements for PROD-AI-ACCESS-SEC — provisioning happens live
+  // during the demo after the new SKU is created via the NPI Fast-Track Tool.
   // --------------------------------------------------------------------------
   const entitlements = [
-    // ACC-001: Cortex Shield (usage-based, under freemium cap - good demo state)
+    // ACC-001: Cortex Shield Freemium (usage-based, near freemium cap - amber warning)
     {
       entitlement_id: 'ENT-001-SHIELD',
       account_id: 'ACC-001',
@@ -356,7 +394,7 @@ export function seedDatabase(db: Database.Database) {
         usage_gb: {
           limit: null,
           freemium_limit: 5,
-          current_value: 3.2,   // 3.2GB used of 5GB free - near cap
+          current_value: 3.2,   // 3.2GB used of 5GB free - near cap, triggers amber warning
         },
       }),
       activated_flags: JSON.stringify(['threat-intel-feed']),
@@ -413,7 +451,7 @@ export function seedDatabase(db: Database.Database) {
       provisioning_status: 'PROVISIONED',
     },
 
-    // ACC-002: Cortex Shield (full enterprise, no freemium cap)
+    // ACC-002: Cortex Shield Enterprise (full enterprise, no freemium cap)
     {
       entitlement_id: 'ENT-002-SHIELD',
       account_id: 'ACC-002',
@@ -436,7 +474,7 @@ export function seedDatabase(db: Database.Database) {
       provisioning_status: 'PROVISIONED',
     },
 
-    // ACC-003: Cortex Shield freemium (SMB, just onboarded, minimal usage)
+    // ACC-003: Cortex Shield Freemium (SMB, just onboarded, minimal usage)
     {
       entitlement_id: 'ENT-003-SHIELD',
       account_id: 'ACC-003',

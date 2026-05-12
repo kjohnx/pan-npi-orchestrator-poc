@@ -183,16 +183,20 @@ export default function DashboardPage() {
                     <>
                 <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
                   <div>
-                    {/** Bundle SKUs have null product_id and should render as "Bundle" in title. */}
                     {(() => {
-                      const productLabel =
-                        entitlement.is_bundle === 1 || entitlement.product_name === null
-                          ? "Bundle"
-                          : entitlement.product_name;
+                      if (entitlement.is_bundle === 1 || entitlement.product_name === null) {
+                        return (
+                          <h2 className="text-xl font-semibold text-gray-900">
+                            Bundle - {entitlement.sku_name}
+                          </h2>
+                        );
+                      }
+                      const title =
+                        entitlement.product_name === entitlement.sku_name
+                          ? entitlement.sku_name
+                          : `${entitlement.product_name} - ${entitlement.sku_name}`;
                       return (
-                        <h2 className="text-xl font-semibold text-gray-900">
-                          {productLabel} - {entitlement.sku_name}
-                        </h2>
+                        <h2 className="text-xl font-semibold text-gray-900">{title}</h2>
                       );
                     })()}
                     <p className="mt-1 text-sm text-gray-600">

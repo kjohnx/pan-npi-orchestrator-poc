@@ -129,9 +129,11 @@ The schema is in `/lib/db/schema.sql`. Do not deviate from it. Key design decisi
 The seed is in `/lib/db/seed.ts`. It populates:
 
 **Feature Flags:** advanced-heuristics, behavioral-analytics, threat-intel-feed,
-auto-remediation, dlp-inline, saas-visibility, legacy-sandbox (INACTIVE)
+auto-remediation, dlp-inline, saas-visibility, legacy-sandbox (INACTIVE),
+policy-enforcement, shadow-ai-detection
 
-**Products:** Cortex Shield (CORTEX), Prisma Access (PRISMA), Cortex XSIAM (CORTEX)
+**Products:** Cortex Shield (CORTEX), Prisma Access (PRISMA), Cortex XSIAM (CORTEX),
+AI Access Security (PRISMA) — intentionally has NO SKUs; used as the NPI Fast-Track demo target
 
 **SKUs:**
 - `SKU-CORTEX-SHIELD-ENT` — usage-based, $10/GB, no freemium, 12-month commit
@@ -196,8 +198,7 @@ the Claude API to return a structured SKU draft.
 
 **Request body:**
 ```json
-{ "concept": "We are launching Cortex Shield. It costs $10/GB, requires a 1-year minimum,
-   and needs to toggle the Advanced-Heuristics flag in the firewall." }
+{ "concept": "We are launching AI Access Security. It governs employee use of generative AI tools across the organization. $15 per user per month, 12-month minimum commitment. Enable the Policy Enforcement flag by default, with Shadow AI Detection as an optional add-on." }
 ```
 
 **What it does:**
@@ -237,7 +238,7 @@ The JSON must match this structure:
 
 For required_flags and optional_flags, use only these valid flag_ids:
 advanced-heuristics, behavioral-analytics, threat-intel-feed, auto-remediation,
-dlp-inline, saas-visibility
+dlp-inline, saas-visibility, policy-enforcement, shadow-ai-detection
 
 If a field cannot be determined from the input, use null or an empty array.
 Infer sensible constraint_definitions based on the pricing_model and unit when they are implied by the concept.
@@ -321,8 +322,7 @@ on the Published tab and returns the user to the Review tab in PATCH mode.
 
 **Tab 1 — Input**
 - Large textarea: "Describe your new product concept"
-- Pre-fill with: *"We are launching 'Cortex Shield.' It costs $10/GB, requires a 1-year
-  minimum, and needs to toggle the 'Advanced-Heuristics' flag in the firewall."*
+- Pre-fill with: *"We are launching AI Access Security. It governs employee use of generative AI tools across the organization. $15 per user per month, 12-month minimum commitment. Enable the Policy Enforcement flag by default, with Shadow AI Detection as an optional add-on."*
 - "Generate Schema" button → calls `POST /api/npi-parse` → loading state → switches to Review
   tab with form populated
 
@@ -549,12 +549,12 @@ entitlement states.
 ## Demo Flow (end-to-end)
 
 1. Open dashboard → select `ACC-001` → note Cortex Shield Freemium at `3.2/5 GB` amber warning meter
-2. Switch to NPI tool → Input tab → pre-filled concept text → click **Generate Schema**
+2. Switch to NPI tool → Input tab → pre-filled AI Access Security concept text → click **Generate Schema**
 3. Review tab → verify AI-parsed form fields → click **Preview Impact** → expand drill-down table showing per-account impact reasons
 4. Click **Publish SKU** → Published tab shows SKU summary
 5. Select `ACC-003` from account dropdown → click **Provision** → success message with Customer Dashboard link
 6. Click Customer Dashboard link → switch to `ACC-003` → new entitlement card appears
-7. Return to NPI tool → click **Modify SKU** → change `pricing_model` to `FREEMIUM` and set `freemium_limit` to `5` → click **Re-publish** → provision to `ACC-001` → dashboard shows freemium meter
+7. Return to NPI tool → click **Modify SKU** → make a live configuration change (e.g. change pricing model or add a freemium tier) → click **Re-publish** → provision updated SKU → dashboard reflects change
 
 ---
 

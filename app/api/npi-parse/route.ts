@@ -23,7 +23,7 @@ The JSON must match this structure:
 
 For required_flags and optional_flags, use only these valid flag_ids:
 advanced-heuristics, behavioral-analytics, threat-intel-feed, auto-remediation,
-dlp-inline, saas-visibility
+dlp-inline, saas-visibility, policy-enforcement, shadow-ai-detection
 
 If a field cannot be determined from the input, use null or an empty array.
 Infer sensible constraint_definitions based on the pricing_model and unit when they are implied by the concept.
