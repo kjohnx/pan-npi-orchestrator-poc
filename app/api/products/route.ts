@@ -9,6 +9,7 @@ type ProductRow = {
   product_line: string | null;
   status: string;
   available_flags: string;
+  supported_constraints: string;
   created_at: string;
 };
 
@@ -25,7 +26,7 @@ export async function GET() {
   const products = db
     .prepare(
       `
-      SELECT product_id, name, description, product_line, status, available_flags, created_at
+      SELECT product_id, name, description, product_line, status, available_flags, supported_constraints, created_at
       FROM products
       ORDER BY name ASC
       `,
@@ -44,10 +45,12 @@ export async function GET() {
 
   const payload = products.map((product) => {
     const availableFlags = parseJson<string[]>(product.available_flags, []);
+    const supportedConstraints = parseJson<string[]>(product.supported_constraints, []);
     const flagDetails = getFlags.all(JSON.stringify(availableFlags)) as FlagRow[];
     return {
       ...product,
       available_flags: availableFlags,
+      supported_constraints: supportedConstraints,
       flag_details: flagDetails,
     };
   });

@@ -14,6 +14,102 @@ import Database from 'better-sqlite3';
 export function seedDatabase(db: Database.Database) {
 
   // --------------------------------------------------------------------------
+  // CONSTRAINT MASTER
+  // Must be seeded before products since products reference constraint_keys.
+  // --------------------------------------------------------------------------
+  const constraintMasterEntries = [
+    {
+      constraint_key: 'usage_gb',
+      display_name: 'Data Processed',
+      unit: 'GB',
+      data_type: 'NUMERIC',
+      category: 'USAGE',
+      description: 'Measures GB of data processed or transferred',
+      llm_hint: 'Apply when pricing is per GB of data processed or transferred',
+      status: 'ACTIVE',
+    },
+    {
+      constraint_key: 'endpoint_count',
+      display_name: 'Licensed Endpoints',
+      unit: 'ENDPOINTS',
+      data_type: 'NUMERIC',
+      category: 'CAPACITY',
+      description: 'Measures number of managed devices or endpoints',
+      llm_hint: 'Apply when product is licensed per managed device or endpoint',
+      status: 'ACTIVE',
+    },
+    {
+      constraint_key: 'bandwidth_mbps',
+      display_name: 'Licensed Bandwidth',
+      unit: 'Mbps',
+      data_type: 'NUMERIC',
+      category: 'CAPACITY',
+      description: 'Measures network throughput capacity',
+      llm_hint: 'Apply when product capacity is measured in network throughput or Mbps',
+      status: 'ACTIVE',
+    },
+    {
+      constraint_key: 'seat_count',
+      display_name: 'Licensed Seats',
+      unit: 'SEATS',
+      data_type: 'NUMERIC',
+      category: 'CAPACITY',
+      description: 'Measures named users or seats',
+      llm_hint: 'Apply when product is licensed per named user or seat',
+      status: 'ACTIVE',
+    },
+    {
+      constraint_key: 'mobile_user_count',
+      display_name: 'Mobile Users',
+      unit: 'USERS',
+      data_type: 'NUMERIC',
+      category: 'CAPACITY',
+      description: 'Measures mobile user count separately from total seat count',
+      llm_hint: 'Apply when product has a distinct mobile user limit separate from total seat count',
+      status: 'ACTIVE',
+    },
+    {
+      constraint_key: 'credit_pool',
+      display_name: 'Credits',
+      unit: 'CREDITS',
+      data_type: 'NUMERIC',
+      category: 'USAGE',
+      description: 'Measures consumption from a credit pool',
+      llm_hint: 'Apply for consumption-based products where customers draw down from a credit balance',
+      status: 'ACTIVE',
+    },
+    {
+      constraint_key: 'data_retention_days',
+      display_name: 'Log Retention',
+      unit: 'DAYS',
+      data_type: 'NUMERIC',
+      category: 'COMPLIANCE',
+      description: 'Measures log retention period in days',
+      llm_hint: 'Apply when product includes a configurable log retention period',
+      status: 'ACTIVE',
+    },
+    {
+      constraint_key: 'api_calls',
+      display_name: 'API Calls',
+      unit: 'CALLS',
+      data_type: 'NUMERIC',
+      category: 'USAGE',
+      description: 'Measures number of API calls consumed',
+      llm_hint: 'Apply when product is metered by API call volume',
+      status: 'ACTIVE',
+    },
+  ];
+
+  const insertConstraint = db.prepare(`
+    INSERT OR IGNORE INTO constraint_master
+      (constraint_key, display_name, unit, data_type, category, description, llm_hint, status)
+    VALUES
+      (@constraint_key, @display_name, @unit, @data_type, @category, @description, @llm_hint, @status)
+  `);
+  for (const c of constraintMasterEntries) insertConstraint.run(c);
+
+
+  // --------------------------------------------------------------------------
   // FEATURE FLAGS
   // --------------------------------------------------------------------------
   const flags = [
@@ -108,6 +204,7 @@ export function seedDatabase(db: Database.Database) {
         'threat-intel-feed',
         'auto-remediation',
       ]),
+      supported_constraints: JSON.stringify(['usage_gb']),
     },
     {
       product_id: 'PROD-PRISMA-ACCESS',
@@ -120,6 +217,7 @@ export function seedDatabase(db: Database.Database) {
         'saas-visibility',
         'threat-intel-feed',
       ]),
+      supported_constraints: JSON.stringify(['bandwidth_mbps', 'mobile_user_count']),
     },
     {
       product_id: 'PROD-XSIAM',
@@ -133,11 +231,8 @@ export function seedDatabase(db: Database.Database) {
         'auto-remediation',
         'threat-intel-feed',
       ]),
+      supported_constraints: JSON.stringify(['endpoint_count', 'data_retention_days']),
     },
-    // -------------------------------------------------------------------------
-    // AI Access Security — intentionally has NO SKUs seeded.
-    // This is the demo target for the NPI Fast-Track Tool.
-    // -------------------------------------------------------------------------
     {
       product_id: 'PROD-AI-ACCESS-SEC',
       name: 'AI Access Security',
@@ -148,14 +243,15 @@ export function seedDatabase(db: Database.Database) {
         'policy-enforcement',
         'shadow-ai-detection',
       ]),
+      supported_constraints: JSON.stringify(['seat_count']),
     },
   ];
 
   const insertProduct = db.prepare(`
     INSERT OR IGNORE INTO products
-      (product_id, name, description, product_line, status, available_flags)
+      (product_id, name, description, product_line, status, available_flags, supported_constraints)
     VALUES
-      (@product_id, @name, @description, @product_line, @status, @available_flags)
+      (@product_id, @name, @description, @product_line, @status, @available_flags, @supported_constraints)
   `);
   for (const p of products) insertProduct.run(p);
 

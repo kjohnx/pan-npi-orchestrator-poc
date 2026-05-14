@@ -19,6 +19,19 @@ export function getDb(): Database.Database {
   const schema = readFileSync(SCHEMA_PATH, "utf-8");
   db.exec(schema);
 
+  try {
+    db.exec(
+      `ALTER TABLE products ADD COLUMN supported_constraints JSON DEFAULT '[]'`,
+    );
+  } catch {
+    /* column already exists — safe to ignore */
+  }
+  try {
+    db.exec(`ALTER TABLE products ADD COLUMN available_flags JSON DEFAULT '[]'`);
+  } catch {
+    /* column already exists — safe to ignore */
+  }
+
   const count = (db.prepare("SELECT COUNT(*) as n FROM products").get() as { n: number }).n;
   if (count === 0) {
     seedDatabase(db);

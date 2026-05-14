@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 const DEFAULT_CONCEPT =
   "We are launching AI Access Security for Enterprise customers. It governs employee use of generative AI tools across the organization. Usage-based pricing at $15 per seat, 12-month minimum commitment. Track licensed seat count as the usage constraint. Enable the Policy Enforcement flag by default, with Shadow AI Detection as an optional add-on.";
@@ -29,6 +29,18 @@ const ACCOUNT_OPTIONS = [
   { id: "ACC-003", company: "Initech Manufacturing", tier: "SMB" },
 ] as const;
 
+const INCLUDE_METRIC_TOOLTIP =
+  "Check to include this metric in the SKU. Included metrics appear as usage meters on the customer dashboard.";
+
+const HEADER_TOOLTIPS = {
+  include: INCLUDE_METRIC_TOOLTIP,
+  metricName:
+    "The name shown to customers on their dashboard — you can customize this",
+  unit: "Unit of measurement — fixed by the product definition",
+  dataType: "How the metric value is stored and compared",
+  required: "Whether this metric must have a value set when provisioning a customer entitlement",
+} as const;
+
 type ConstraintDefinition = {
   key: string;
   label: string;
@@ -54,6 +66,19 @@ type SkuDraft = {
 type Product = {
   product_id: string;
   name: string;
+  status: string;
+  supported_constraints: string[];
+  available_flags: string[];
+};
+
+type ConstraintMasterEntry = {
+  constraint_key: string;
+  display_name: string;
+  unit: string;
+  data_type: string;
+  category: string | null;
+  description: string | null;
+  llm_hint: string | null;
   status: string;
 };
 
@@ -192,6 +217,37 @@ function safeNumber(value: string): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function dataTypeToConstraintType(dataType: string): ConstraintDefinition["type"] {
+  const upper = dataType.toUpperCase();
+  if (upper === "STRING") return "STRING";
+  if (upper === "BOOLEAN") return "BOOLEAN";
+  return "NUMERIC";
+}
+
+function constraintDefFromMaster(master: ConstraintMasterEntry, required = false): ConstraintDefinition {
+  return {
+    key: master.constraint_key,
+    label: master.display_name,
+    type: dataTypeToConstraintType(master.data_type),
+    unit: master.unit,
+    required,
+  };
+}
+
+/** Priority 2: auto-include when draft unit implies a catalog constraint key. */
+function constraintKeyMatchesDraftUnit(draftUnit: string, constraintKey: string): boolean {
+  const u = (draftUnit ?? "").trim().toUpperCase();
+  const k = constraintKey.toLowerCase();
+  if (u === "GB" && k === "usage_gb") return true;
+  if ((u === "SEAT" || u === "SEATS") && k === "seat_count") return true;
+  if ((u === "ENDPOINT" || u === "ENDPOINTS") && k === "endpoint_count") return true;
+  if (u === "MBPS" && k === "bandwidth_mbps") return true;
+  if (u === "USERS" && k === "mobile_user_count") return true;
+  if ((u === "CREDIT" || u === "CREDITS") && k === "credit_pool") return true;
+  if (u === "DAYS" && k === "data_retention_days") return true;
+  return false;
+}
+
 export default function NpiPage() {
   const [activeTab, setActiveTab] = useState<Tab>("input");
   const [concept, setConcept] = useState(DEFAULT_CONCEPT);
@@ -215,9 +271,91 @@ export default function NpiPage() {
   const [isProvisioning, setIsProvisioning] = useState(false);
   const [provisionSuccessCompany, setProvisionSuccessCompany] = useState<string | null>(null);
   const [provisionWarning, setProvisionWarning] = useState<string>("");
+  const [availableConstraints, setAvailableConstraints] = useState<ConstraintMasterEntry[]>([]);
+  const [skuValidationPassed, setSkuValidationPassed] = useState(false);
+  const [skuValidationNotice, setSkuValidationNotice] = useState<
+    | { type: "success"; message: string }
+    | { type: "error"; messages: string[] }
+    | null
+  >(null);
+  const [isValidatingSku, setIsValidatingSku] = useState(false);
+  const validatedFingerprintRef = useRef<string | null>(null);
+
+  const validationFingerprint = useMemo(
+    () => JSON.stringify({ draft, productId }),
+    [draft, productId],
+  );
+
+  useEffect(() => {
+    void fetchProducts();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- load once on mount
+  }, []);
+
+  useEffect(() => {
+    if (validatedFingerprintRef.current === null) return;
+    if (validationFingerprint !== validatedFingerprintRef.current) {
+      validatedFingerprintRef.current = null;
+      setSkuValidationPassed(false);
+      setSkuValidationNotice(null);
+    }
+  }, [validationFingerprint]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadConstraints() {
+      if (!productId) {
+        if (!cancelled) setAvailableConstraints([]);
+        return;
+      }
+      const product = products.find((p) => p.product_id === productId);
+      const keys = product?.supported_constraints ?? [];
+      if (keys.length === 0) {
+        if (!cancelled) setAvailableConstraints([]);
+        return;
+      }
+      const response = await fetch(
+        `/api/constraint-master?keys=${encodeURIComponent(keys.join(","))}`,
+      );
+      if (!response.ok || cancelled) return;
+      const data = (await response.json()) as ConstraintMasterEntry[];
+      if (!cancelled) setAvailableConstraints(Array.isArray(data) ? data : []);
+    }
+    void loadConstraints();
+    return () => {
+      cancelled = true;
+    };
+  }, [productId, products]);
+
+  useEffect(() => {
+    if (!productId.trim() || availableConstraints.length === 0) return;
+    const catalogKeys = new Set(availableConstraints.map((m) => m.constraint_key));
+    setDraft((current) => {
+      const filtered = current.constraint_definitions.filter((d) => catalogKeys.has(d.key));
+      const keySet = new Set(filtered.map((d) => d.key));
+      const next = [...filtered];
+      for (const master of availableConstraints) {
+        if (keySet.has(master.constraint_key)) continue;
+        if (constraintKeyMatchesDraftUnit(current.unit, master.constraint_key)) {
+          next.push(constraintDefFromMaster(master, true));
+          keySet.add(master.constraint_key);
+        }
+      }
+      if (JSON.stringify(next) === JSON.stringify(current.constraint_definitions)) {
+        return current;
+      }
+      return { ...current, constraint_definitions: next };
+    });
+  }, [availableConstraints, productId, draft.unit]);
 
   const selectedProductName = useMemo(() => {
     return products.find((product) => product.product_id === productId)?.name ?? null;
+  }, [productId, products]);
+
+  const visibleFlagOptions = useMemo(() => {
+    if (!productId.trim()) return [...FLAG_OPTIONS];
+    const product = products.find((p) => p.product_id === productId);
+    const allowed = new Set(product?.available_flags ?? []);
+    return FLAG_OPTIONS.filter((f) => allowed.has(f.id));
   }, [productId, products]);
 
   async function fetchProducts() {
@@ -232,6 +370,24 @@ export default function NpiPage() {
     }
   }
 
+  function handleProductChange(nextProductId: string) {
+    setDraft((current) => {
+      const nextProduct = products.find((p) => p.product_id === nextProductId);
+      const allowed =
+        nextProductId.trim() && nextProduct ? new Set(nextProduct.available_flags ?? []) : null;
+      return {
+        ...current,
+        required_flags: allowed ? current.required_flags.filter((id) => allowed.has(id)) : [],
+        optional_flags: allowed ? current.optional_flags.filter((id) => allowed.has(id)) : [],
+        constraint_definitions: [],
+      };
+    });
+    setProductId(nextProductId);
+    setSkuValidationPassed(false);
+    setSkuValidationNotice(null);
+    validatedFingerprintRef.current = null;
+  }
+
   async function handleGenerateSchema() {
     setError("");
     setStatusMessage("");
@@ -242,6 +398,9 @@ export default function NpiPage() {
     setIsParsing(true);
     setRawAiOutput(null);
     setIsRawOpen(false);
+    setSkuValidationPassed(false);
+    setSkuValidationNotice(null);
+    validatedFingerprintRef.current = null;
 
     try {
       if (!concept.trim()) {
@@ -255,7 +414,10 @@ export default function NpiPage() {
       const response = await fetch("/api/npi-parse", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ concept }),
+        body: JSON.stringify({
+          concept,
+          ...(productId.trim() ? { product_id: productId } : {}),
+        }),
       });
 
       const json = (await response.json()) as {
@@ -384,6 +546,10 @@ export default function NpiPage() {
     setIsPublishing(true);
 
     try {
+      if (!skuValidationPassed) {
+        throw new Error("Validate SKU before publishing.");
+      }
+
       if (!draft.name.trim()) {
         throw new Error("SKU name is required.");
       }
@@ -426,6 +592,9 @@ export default function NpiPage() {
       setPublishedSku(json.data);
       setActiveTab("published");
       setIsModifyMode(false);
+      setSkuValidationPassed(false);
+      setSkuValidationNotice(null);
+      validatedFingerprintRef.current = null;
       setStatusMessage(method === "POST" ? "SKU published successfully." : "SKU updated successfully.");
     } catch (publishError) {
       setError(publishError instanceof Error ? publishError.message : "Unexpected publish error.");
@@ -510,29 +679,70 @@ export default function NpiPage() {
     });
   }
 
-  function updateConstraint(index: number, next: Partial<ConstraintDefinition>) {
+  function setMasterConstraintIncluded(master: ConstraintMasterEntry, included: boolean) {
     setDraft((current) => {
+      if (included) {
+        if (current.constraint_definitions.some((d) => d.key === master.constraint_key)) {
+          return current;
+        }
+        return {
+          ...current,
+          constraint_definitions: [...current.constraint_definitions, constraintDefFromMaster(master, false)],
+        };
+      }
+      return {
+        ...current,
+        constraint_definitions: current.constraint_definitions.filter((d) => d.key !== master.constraint_key),
+      };
+    });
+  }
+
+  function updateConstraintByKey(constraintKey: string, partial: Partial<ConstraintDefinition>) {
+    setDraft((current) => {
+      const index = current.constraint_definitions.findIndex((d) => d.key === constraintKey);
+      if (index < 0) return current;
       const copy = [...current.constraint_definitions];
-      copy[index] = { ...copy[index], ...next };
+      copy[index] = { ...copy[index], ...partial };
       return { ...current, constraint_definitions: copy };
     });
   }
 
-  function addConstraint() {
-    setDraft((current) => ({
-      ...current,
-      constraint_definitions: [
-        ...current.constraint_definitions,
-        { key: "", label: "", type: "NUMERIC", unit: "", required: false },
-      ],
-    }));
-  }
-
-  function removeConstraint(index: number) {
-    setDraft((current) => ({
-      ...current,
-      constraint_definitions: current.constraint_definitions.filter((_, i) => i !== index),
-    }));
+  async function handleValidateSku() {
+    setError("");
+    setIsValidatingSku(true);
+    try {
+      if (!productId.trim()) {
+        throw new Error("Select a product before validating.");
+      }
+      const response = await fetch("/api/validate-sku", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ draft, product_id: productId }),
+      });
+      const json = (await response.json()) as { valid?: boolean; errors?: string[] };
+      if (!response.ok) {
+        throw new Error("Validation request failed.");
+      }
+      if (json.valid) {
+        validatedFingerprintRef.current = validationFingerprint;
+        setSkuValidationPassed(true);
+        setSkuValidationNotice({
+          type: "success",
+          message: "SKU validation passed — ready to publish",
+        });
+      } else {
+        validatedFingerprintRef.current = null;
+        setSkuValidationPassed(false);
+        setSkuValidationNotice({ type: "error", messages: json.errors ?? [] });
+      }
+    } catch (validateError) {
+      validatedFingerprintRef.current = null;
+      setSkuValidationPassed(false);
+      setSkuValidationNotice(null);
+      setError(validateError instanceof Error ? validateError.message : "Validation failed.");
+    } finally {
+      setIsValidatingSku(false);
+    }
   }
 
   const tabs: Array<{ id: Tab; label: string; enabled: boolean }> = [
@@ -634,7 +844,7 @@ export default function NpiPage() {
                   <span className="mb-2 block text-sm font-medium text-slate-200">Product</span>
                   <select
                     value={productId}
-                    onChange={(event) => setProductId(event.target.value)}
+                    onChange={(event) => handleProductChange(event.target.value)}
                     className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-blue-500 focus:ring-2"
                   >
                     <option value="">Select product</option>
@@ -645,6 +855,9 @@ export default function NpiPage() {
                     ))}
                   </select>
                 </label>
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-2">
                 <label className="block">
                   <span className="mb-2 block text-sm font-medium text-slate-200">Pricing Model</span>
                   <select
@@ -665,15 +878,21 @@ export default function NpiPage() {
                   </select>
                 </label>
                 <label className="block">
-                  <span className="mb-2 block text-sm font-medium text-slate-200">Price per Unit</span>
+                  <span className="mb-2 block text-sm font-medium text-slate-200">Min Commitment (months)</span>
                   <input
-                    value={draft.price_per_unit ?? ""}
+                    value={draft.min_commitment_months ?? ""}
                     onChange={(event) =>
-                      setDraft((current) => ({ ...current, price_per_unit: safeNumber(event.target.value) }))
+                      setDraft((current) => ({
+                        ...current,
+                        min_commitment_months: safeNumber(event.target.value),
+                      }))
                     }
                     className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-blue-500 focus:ring-2"
                   />
                 </label>
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-3">
                 <label className="block">
                   <span className="mb-2 block text-sm font-medium text-slate-200">Currency</span>
                   <input
@@ -683,6 +902,16 @@ export default function NpiPage() {
                         ...current,
                         price_currency: event.target.value.toUpperCase() as "USD",
                       }))
+                    }
+                    className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-blue-500 focus:ring-2"
+                  />
+                </label>
+                <label className="block">
+                  <span className="mb-2 block text-sm font-medium text-slate-200">Price per Unit</span>
+                  <input
+                    value={draft.price_per_unit ?? ""}
+                    onChange={(event) =>
+                      setDraft((current) => ({ ...current, price_per_unit: safeNumber(event.target.value) }))
                     }
                     className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-blue-500 focus:ring-2"
                   />
@@ -703,6 +932,9 @@ export default function NpiPage() {
                     ))}
                   </select>
                 </label>
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-2">
                 <label className="block">
                   <span className="mb-2 block text-sm font-medium text-slate-200">Freemium Limit</span>
                   <input
@@ -713,26 +945,14 @@ export default function NpiPage() {
                     className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-blue-500 focus:ring-2"
                   />
                 </label>
-                <label className="block">
-                  <span className="mb-2 block text-sm font-medium text-slate-200">Min Commitment (months)</span>
-                  <input
-                    value={draft.min_commitment_months ?? ""}
-                    onChange={(event) =>
-                      setDraft((current) => ({
-                        ...current,
-                        min_commitment_months: safeNumber(event.target.value),
-                      }))
-                    }
-                    className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-blue-500 focus:ring-2"
-                  />
-                </label>
+                <div aria-hidden="true" className="hidden md:block" />
               </div>
 
               <div className="grid gap-4 md:grid-cols-2">
                 <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
                   <p className="mb-3 text-sm font-medium text-slate-200">Required Flags</p>
                   <div className="space-y-2">
-                    {FLAG_OPTIONS.map((flag) => (
+                    {visibleFlagOptions.map((flag) => (
                       <label key={flag.id} className="flex items-center gap-2 text-sm text-slate-300">
                         <input
                           type="checkbox"
@@ -747,7 +967,7 @@ export default function NpiPage() {
                 <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
                   <p className="mb-3 text-sm font-medium text-slate-200">Optional Flags</p>
                   <div className="space-y-2">
-                    {FLAG_OPTIONS.map((flag) => (
+                    {visibleFlagOptions.map((flag) => (
                       <label key={flag.id} className="flex items-center gap-2 text-sm text-slate-300">
                         <input
                           type="checkbox"
@@ -762,113 +982,108 @@ export default function NpiPage() {
               </div>
 
               <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
-                <div className="mb-3 flex items-center justify-between">
-                  <p className="text-sm font-medium text-slate-200">Constraint Definitions</p>
-                  <button
-                    type="button"
-                    onClick={addConstraint}
-                    className="rounded-md border border-slate-600 px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:border-blue-400 hover:text-white"
-                  >
-                    Add Row
-                  </button>
+                <div className="mb-3">
+                  <p className="text-sm font-medium text-slate-200">Usage Tracking</p>
+                  <p className="mt-1 max-w-3xl text-xs text-slate-400">
+                    Select what to measure for this product. These metrics appear as usage meters on the customer
+                    dashboard. Display Name can be customized — Unit and Data Type are fixed by the product definition.
+                  </p>
                 </div>
-                <p className="mb-3 text-xs text-slate-400">
-                  Define the usage and limit schema for this SKU. AI should infer these based on pricing model
-                  (for example usage volume for USAGE/FREEMIUM, seat count for FLAT, and tier metric for TIERED).
-                </p>
 
-                <div className="space-y-3">
-                  {draft.constraint_definitions.length === 0 && (
-                    <p className="text-sm text-slate-400">No constraints added yet.</p>
-                  )}
-                  {draft.constraint_definitions.length > 0 && (
-                    <div className="hidden gap-2 px-3 py-1 md:grid md:grid-cols-12">
-                      <span
-                        className="md:col-span-2 cursor-help text-xs font-semibold uppercase tracking-wide text-slate-400"
-                        title="Internal identifier used in the system, e.g. usage_gb"
-                      >
-                        Key
-                      </span>
-                      <span
-                        className="md:col-span-3 cursor-help text-xs font-semibold uppercase tracking-wide text-slate-400"
-                        title="Human-readable name shown on customer dashboard, e.g. Data Processed (GB)"
-                      >
-                        Label
-                      </span>
-                      <span
-                        className="md:col-span-2 cursor-help text-xs font-semibold uppercase tracking-wide text-slate-400"
-                        title="Data type of the constraint value"
-                      >
-                        Type
-                      </span>
-                      <span
-                        className="md:col-span-2 cursor-help text-xs font-semibold uppercase tracking-wide text-slate-400"
-                        title="Unit of measurement displayed to customers, e.g. GB, Mbps, Endpoints"
-                      >
-                        Unit
-                      </span>
-                      <span
-                        className="md:col-span-2 cursor-help text-xs font-semibold uppercase tracking-wide text-slate-400"
-                        title="Whether this constraint must be set when provisioning a customer entitlement"
-                      >
-                        Required
-                      </span>
-                      <span className="md:col-span-1" aria-hidden="true" />
-                    </div>
-                  )}
-                  {draft.constraint_definitions.map((constraint, index) => (
-                    <div key={`${constraint.key}-${index}`} className="grid gap-2 rounded-lg border border-slate-800 p-3 md:grid-cols-12">
-                      <input
-                        placeholder="key (e.g. usage_gb)"
-                        value={constraint.key}
-                        onChange={(event) => updateConstraint(index, { key: event.target.value })}
-                        className="rounded border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm md:col-span-2"
-                      />
-                      <input
-                        placeholder="label (e.g. Usage Volume)"
-                        value={constraint.label}
-                        onChange={(event) => updateConstraint(index, { label: event.target.value })}
-                        className="rounded border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm md:col-span-3"
-                      />
-                      <select
-                        value={constraint.type}
-                        onChange={(event) =>
-                          updateConstraint(index, {
-                            type: event.target.value as ConstraintDefinition["type"],
-                          })
-                        }
-                        className="rounded border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm md:col-span-2"
-                      >
-                        {CONSTRAINT_TYPES.map((type) => (
-                          <option key={type} value={type}>
-                            {type}
-                          </option>
-                        ))}
-                      </select>
-                      <input
-                        placeholder="unit (e.g. GB)"
-                        value={constraint.unit}
-                        onChange={(event) => updateConstraint(index, { unit: event.target.value })}
-                        className="rounded border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm md:col-span-2"
-                      />
-                      <label className="flex items-center gap-2 text-sm text-slate-300 md:col-span-2">
-                        <input
-                          type="checkbox"
-                          checked={constraint.required}
-                          onChange={(event) => updateConstraint(index, { required: event.target.checked })}
-                        />
-                        Required
-                      </label>
-                      <button
-                        type="button"
-                        onClick={() => removeConstraint(index)}
-                        className="rounded border border-rose-600/60 px-2 py-1.5 text-xs text-rose-300 transition hover:bg-rose-950/40 md:col-span-1"
-                      >
-                        Remove
-                      </button>
-                    </div>
-                  ))}
-                </div>
+                {!productId.trim() ? (
+                  <p className="text-sm text-slate-400">Select a product to see available constraints</p>
+                ) : (
+                  <div className="space-y-3">
+                    {availableConstraints.length === 0 && (
+                      <p className="text-sm text-slate-400">No constraint catalog entries for this product.</p>
+                    )}
+                    {availableConstraints.length > 0 && (
+                      <div className="hidden gap-3 px-3 py-1 md:grid md:grid-cols-12 md:items-end">
+                        <span
+                          className="md:col-span-2 text-xs font-semibold uppercase tracking-wide text-gray-400"
+                          title={HEADER_TOOLTIPS.include}
+                        >
+                          INCLUDE
+                        </span>
+                        <span
+                          className="md:col-span-4 text-xs font-semibold uppercase tracking-wide text-gray-400"
+                          title={HEADER_TOOLTIPS.metricName}
+                        >
+                          METRIC NAME
+                        </span>
+                        <span
+                          className="md:col-span-2 text-xs font-semibold uppercase tracking-wide text-gray-400"
+                          title={HEADER_TOOLTIPS.unit}
+                        >
+                          UNIT
+                        </span>
+                        <span
+                          className="md:col-span-2 text-xs font-semibold uppercase tracking-wide text-gray-400"
+                          title={HEADER_TOOLTIPS.dataType}
+                        >
+                          DATA TYPE
+                        </span>
+                        <span
+                          className="md:col-span-2 text-xs font-semibold uppercase tracking-wide text-gray-400"
+                          title={HEADER_TOOLTIPS.required}
+                        >
+                          REQUIRED
+                        </span>
+                      </div>
+                    )}
+                    {availableConstraints.map((master) => {
+                      const def = draft.constraint_definitions.find((d) => d.key === master.constraint_key);
+                      const included = Boolean(def);
+                      return (
+                        <div
+                          key={master.constraint_key}
+                          className="grid gap-3 rounded-lg border border-slate-800 p-3 md:grid-cols-12 md:items-center"
+                        >
+                          <label
+                            className="flex items-center gap-2 text-sm text-slate-300 md:col-span-2"
+                            title={INCLUDE_METRIC_TOOLTIP}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={included}
+                              onChange={(event) => setMasterConstraintIncluded(master, event.target.checked)}
+                            />
+                            Include
+                          </label>
+                          <div className="md:col-span-4">
+                            <input
+                              aria-label="Metric name"
+                              title={master.description ?? undefined}
+                              value={def?.label ?? master.display_name}
+                              disabled={!included}
+                              onChange={(event) =>
+                                updateConstraintByKey(master.constraint_key, { label: event.target.value })
+                              }
+                              className="w-full rounded border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm disabled:cursor-not-allowed disabled:opacity-50"
+                            />
+                          </div>
+                          <div className="md:col-span-2">
+                            <p className="text-sm text-slate-200">{master.unit}</p>
+                          </div>
+                          <div className="md:col-span-2">
+                            <p className="text-sm text-slate-200">{master.data_type}</p>
+                          </div>
+                          <label className="flex items-center gap-2 text-sm text-slate-300 md:col-span-2">
+                            <input
+                              type="checkbox"
+                              checked={def?.required ?? false}
+                              disabled={!included}
+                              onChange={(event) =>
+                                updateConstraintByKey(master.constraint_key, { required: event.target.checked })
+                              }
+                            />
+                            Required
+                          </label>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
 
               <label className="block">
@@ -900,7 +1115,29 @@ export default function NpiPage() {
               </div>
 
               <div className="space-y-4">
+                {skuValidationNotice?.type === "success" && (
+                  <div className="rounded-lg border border-emerald-700/40 bg-emerald-950/40 px-4 py-3 text-sm text-emerald-200">
+                    {skuValidationNotice.message}
+                  </div>
+                )}
+                {skuValidationNotice?.type === "error" && (
+                  <div className="rounded-lg border border-rose-700/40 bg-rose-950/40 px-4 py-3 text-sm text-rose-200">
+                    <ul className="list-disc space-y-1 pl-5">
+                      {skuValidationNotice.messages.map((message, index) => (
+                        <li key={`${message}-${index}`}>{message}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
                 <div className="flex flex-wrap justify-end gap-3">
+                  <button
+                    type="button"
+                    onClick={handleValidateSku}
+                    disabled={isValidatingSku}
+                    className="rounded-lg border border-blue-500/60 bg-blue-950/40 px-4 py-2 text-sm font-semibold text-blue-100 transition hover:border-blue-400 hover:bg-blue-950/60 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {isValidatingSku ? "Validating..." : "Validate SKU"}
+                  </button>
                   <button
                     type="button"
                     onClick={handlePreviewImpact}
@@ -912,8 +1149,8 @@ export default function NpiPage() {
                   <button
                     type="button"
                     onClick={publishSku}
-                    disabled={isPublishing}
-                    className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-50"
+                    disabled={isPublishing || !skuValidationPassed}
+                    className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {isPublishing
                       ? isModifyMode
@@ -1115,6 +1352,9 @@ export default function NpiPage() {
                   onClick={() => {
                     setRawAiOutput(null);
                     setIsRawOpen(false);
+                    setSkuValidationPassed(false);
+                    setSkuValidationNotice(null);
+                    validatedFingerprintRef.current = null;
                     setDraft((current) => ({
                       ...current,
                       pricing_model: (publishedSku.pricing_model as SkuDraft["pricing_model"]) ?? current.pricing_model,

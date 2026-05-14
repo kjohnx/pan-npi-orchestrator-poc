@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS products (
   product_line    TEXT,               -- e.g. CORTEX, PRISMA, NGFW, XSIAM
   status          TEXT DEFAULT 'ACTIVE',  -- ACTIVE | DEPRECATED
   available_flags JSON DEFAULT '[]',  -- array of flag_ids available on this product
+  supported_constraints JSON DEFAULT '[]',  -- array of constraint_keys from constraint_master
   created_at      TEXT DEFAULT (datetime('now'))
 );
 
@@ -32,6 +33,23 @@ CREATE TABLE IF NOT EXISTS feature_flags (
   description   TEXT,
   default_state TEXT DEFAULT 'LOCKED',  -- LOCKED | ACTIVE (what new entitlements get)
   status        TEXT DEFAULT 'ACTIVE'   -- ACTIVE | INACTIVE (INACTIVE = deprecated, hide from UI)
+);
+
+-- -----------------------------------------------------------------------------
+-- CONSTRAINT MASTER
+-- Authoritative registry of measurable constraints available across products.
+-- Products reference these by constraint_key in their supported_constraints array.
+-- SKUs denormalize a subset into constraint_definitions at publish time.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS constraint_master (
+  constraint_key  TEXT PRIMARY KEY,
+  display_name    TEXT NOT NULL,
+  unit            TEXT NOT NULL,
+  data_type       TEXT NOT NULL,   -- NUMERIC | STRING | BOOLEAN
+  category        TEXT,            -- USAGE | CAPACITY | COMPLIANCE
+  description     TEXT,            -- human-readable explanation
+  llm_hint        TEXT,            -- guidance for LLM: when to apply this constraint
+  status          TEXT DEFAULT 'ACTIVE'  -- ACTIVE | DEPRECATED
 );
 
 -- -----------------------------------------------------------------------------
@@ -143,7 +161,8 @@ CREATE TABLE IF NOT EXISTS npi_submissions (
 -- -----------------------------------------------------------------------------
 -- Indexes for common query patterns
 -- -----------------------------------------------------------------------------
-CREATE INDEX IF NOT EXISTS idx_entitlements_account ON entitlements(account_id);
-CREATE INDEX IF NOT EXISTS idx_entitlements_sku     ON entitlements(sku_id);
-CREATE INDEX IF NOT EXISTS idx_skus_product         ON skus(product_id);
-CREATE INDEX IF NOT EXISTS idx_skus_status          ON skus(status);
+CREATE INDEX IF NOT EXISTS idx_entitlements_account     ON entitlements(account_id);
+CREATE INDEX IF NOT EXISTS idx_entitlements_sku         ON entitlements(sku_id);
+CREATE INDEX IF NOT EXISTS idx_skus_product             ON skus(product_id);
+CREATE INDEX IF NOT EXISTS idx_skus_status              ON skus(status);
+CREATE INDEX IF NOT EXISTS idx_constraint_master_status ON constraint_master(status);

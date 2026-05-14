@@ -33,6 +33,8 @@ working, demonstrable functionality — not polish or scale.
 - **Database:** SQLite via `better-sqlite3`, file at `/data/npi_orchestrator.db`
 - **AI parsing:** Anthropic Claude API (`claude-sonnet-4-5`) — called from a Next.js
   API route when the NPI user submits a plain-English product concept
+- **SKU validation (BRMS):** `json-rules-engine` in **`lib/rules/sku-rules.ts`**, invoked from
+  **`POST /api/validate-sku`**
 - **Deployment target:** Local — no need to optimize for Vercel serverless
 
 ### Local dev server (important)
@@ -68,6 +70,8 @@ CHOKIDAR_USEPOLLING=false
 ├── lib/
 │   ├── api/
 │   │   └── utils.ts               ← shared helpers (JSON parsing, ID generators, etc.) for API routes
+│   ├── rules/
+│   │   └── sku-rules.ts           ← json-rules-engine BRMS: validateSkuDraft / SKU draft rules
 │   └── db/
 │       ├── client.ts              ← better-sqlite3 singleton; initializes DB on first run
 │       ├── schema.sql             ← CREATE TABLE statements (provided below)
@@ -77,6 +81,8 @@ CHOKIDAR_USEPOLLING=false
 │   │   ├── skus/route.ts          ← GET (list), POST (create)
 │   │   ├── skus/[sku_id]/route.ts ← GET (one), PATCH (update)
 │   │   ├── products/route.ts      ← GET (list)
+│   │   ├── constraint-master/route.ts ← GET: ACTIVE constraint_master rows (optional ?keys=)
+│   │   ├── validate-sku/route.ts  ← POST: BRMS validation for current draft
 │   │   ├── entitlements/route.ts  ← GET (by account), POST (create)
 │   │   ├── entitlements/[id]/route.ts ← PATCH (update status/flags/constraints)
 │   │   └── npi-parse/route.ts     ← POST: calls Claude API, returns parsed SKU schema
@@ -97,7 +103,13 @@ CHOKIDAR_USEPOLLING=false
 The schema is in `/lib/db/schema.sql`. Do not deviate from it. Key design decisions:
 
 - **`products`** — the engineering product. Owns the universe of available feature flags
-  for that product via `available_flags` (JSON array of flag_ids).
+  for that product via `available_flags` (JSON array of flag_ids), and which measurable
+  constraints apply via `supported_constraints` (JSON array of `constraint_key` values from
+  **`constraint_master`**).
+
+- **`constraint_master`** — registry of measurable constraints (`constraint_key`, display metadata,
+  `llm_hint`, `status`). Products reference keys in `supported_constraints`; SKUs denormalize
+  a subset into `constraint_definitions` at publish time.
 
 - **`feature_flags`** — toggleable product capabilities. `status: INACTIVE` means deprecated
   — hide from all UIs even if referenced on old entitlements.
@@ -133,7 +145,11 @@ auto-remediation, dlp-inline, saas-visibility, legacy-sandbox (INACTIVE),
 policy-enforcement, shadow-ai-detection
 
 **Products:** Cortex Shield (CORTEX), Prisma Access (PRISMA), Cortex XSIAM (CORTEX),
-AI Access Security (PRISMA) — intentionally has NO SKUs; used as the NPI Fast-Track demo target
+AI Access Security (PRISMA) — intentionally has NO SKUs; used as the NPI Fast-Track demo target.
+Each product has `supported_constraints` pointing at seeded `constraint_master` keys.
+
+**Constraint master:** eight ACTIVE rows (e.g. `usage_gb`, `endpoint_count`, `bandwidth_mbps`,
+`seat_count`, `mobile_user_count`, `credit_pool`, `data_retention_days`, `api_calls`).
 
 **SKUs:**
 - `SKU-CORTEX-SHIELD-ENT` — usage-based, $10/GB, no freemium, 12-month commit
@@ -160,8 +176,11 @@ near freemium cap) and XSIAM-ENT. ACC-003 has a PENDING bundle entitlement.
 2. Create `/data/` directory if it doesn't exist
 3. Open (or create) `/data/npi_orchestrator.db`
 4. Run `schema.sql` (idempotent — uses `CREATE TABLE IF NOT EXISTS`)
-5. Check if `products` table is empty; if so, run `seedDatabase(db)`
-6. Export the db instance as a singleton (use module-level caching)
+5. Run **idempotent migrations** in `try`/`catch` blocks for legacy SQLite files that predate
+   newer columns (e.g. `ALTER TABLE products ADD COLUMN supported_constraints …`; duplicate
+   attempts are ignored when the column already exists).
+6. Check if `products` table is empty; if so, run `seedDatabase(db)`
+7. Export the db instance as a singleton (use module-level caching)
 
 ```typescript
 import Database from 'better-sqlite3';
@@ -198,8 +217,15 @@ the Claude API to return a structured SKU draft.
 
 **Request body:**
 ```json
-{ "concept": "We are launching AI Access Security for Enterprise customers. It governs employee use of generative AI tools across the organization. Usage-based pricing at $15 per seat, 12-month minimum commitment. Track licensed seat count as the usage constraint. Enable the Policy Enforcement flag by default, with Shadow AI Detection as an optional add-on." }
+{
+  "concept": "…plain English…",
+  "product_id": "PROD-CORTEX-SHIELD"
+}
 ```
+`product_id` is optional. When present, the route loads that product’s `available_flags` and
+`supported_constraints`, fetches matching **`constraint_master`** rows, and **appends** guidance
+to the system prompt: only those flag_ids and constraint_keys may appear in the parsed JSON;
+anything the user mentions outside those lists should be omitted with an explanation in `notes`.
 
 **What it does:**
 - Calls **`claude-sonnet-4-5`** with a system prompt that instructs it to return ONLY
@@ -213,7 +239,7 @@ the Claude API to return a structured SKU draft.
 - Returns **`{ data: <parsed schema>, raw: <original model text> }`** on success so the NPI
   UI can show a transparent “raw AI” view alongside the parsed form
 
-**System prompt for Claude API (canonical copy in `app/api/npi-parse/route.ts`; keep in sync):**
+**System prompt base (canonical copy in `app/api/npi-parse/route.ts`; keep in sync):**
 ```
 You are an NPI schema parser for Palo Alto Networks. When given a plain-English
 product concept, extract the structured fields and return ONLY a valid JSON object.
@@ -236,9 +262,7 @@ The JSON must match this structure:
   "notes": string
 }
 
-For required_flags and optional_flags, use only these valid flag_ids:
-advanced-heuristics, behavioral-analytics, threat-intel-feed, auto-remediation,
-dlp-inline, saas-visibility, policy-enforcement, shadow-ai-detection
+When product_id is provided in the request body, the route fetches available_flags from the product record and injects them into the system prompt dynamically — only those flag_ids are valid for that product. When no product_id is provided, the base system prompt does not restrict flag_ids and the LLM uses its general knowledge of available flags.
 
 If a field cannot be determined from the input, use null or an empty array.
 Infer sensible constraint_definitions based on the pricing_model and unit when they are implied by the concept.
@@ -301,7 +325,20 @@ Non-bundle entitlements return `component_skus: []`.
   `provisioning_status`.
 
 ### `/api/products` (GET)
-- Return all products with `available_flags` array parsed, joined with their flag details.
+- Return all products with `available_flags` and **`supported_constraints`** parsed as JSON
+  arrays (alongside the raw DB columns being replaced in the JSON payload), joined with their
+  flag details.
+
+### `/api/constraint-master` (GET)
+- Returns a **JSON array** of all **`constraint_master`** rows where `status = 'ACTIVE'`.
+- Optional query **`?keys=`** (comma-separated `constraint_key` values, e.g. from
+  `product.supported_constraints.join(',')`) adds `AND constraint_key IN (…)` so the NPI Review tab
+  loads only constraints supported by the selected product.
+
+### `/api/validate-sku` (POST)
+- Request body: **`{ draft, product_id }`**. The handler maps **`draft`** into **`SkuFacts`** and
+  runs **`validateSkuDraft`** from **`lib/rules/sku-rules.ts`** (see **BRMS** under NPI Review tab).
+- Response: **`{ valid: boolean, errors: string[] }`**.
 
 ### Shared API helpers (`/lib/api/utils.ts`)
 
@@ -323,22 +360,75 @@ on the Published tab and returns the user to the Review tab in PATCH mode.
 **Tab 1 — Input**
 - Large textarea: "Describe your new product concept"
 - Pre-fill with: *"We are launching AI Access Security for Enterprise customers. It governs employee use of generative AI tools across the organization. Usage-based pricing at $15 per seat, 12-month minimum commitment. Track licensed seat count as the usage constraint. Enable the Policy Enforcement flag by default, with Shadow AI Detection as an optional add-on."*
-- "Generate Schema" button → calls `POST /api/npi-parse` → loading state → switches to Review
-  tab with form populated
+- "Generate Schema" button → calls `POST /api/npi-parse` (includes **`product_id`** in the body
+  when a product is already selected on the form) → loading state → switches to Review tab with
+  form populated
 
 **Tab 2 — Review**
 - Form pre-filled from AI output. All fields editable.
-- Fields: SKU Name, Product (from `GET /api/products`), Pricing Model (dropdown), Price per Unit,
-  Currency, Unit, Freemium Limit, Min Commitment, Required Flags (multi-select), Optional
-  Flags (multi-select), Constraint Definitions (add/remove rows), Notes
-- **Constraint definitions:** column headers **Key**, **Label**, **Type**, **Unit**,
-  **Required** appear above the row inputs (aligned on md+ layouts). Each header uses a
-  native **`title` tooltip** with this copy:
-  - **Key:** `Internal identifier used in the system, e.g. usage_gb`
-  - **Label:** `Human-readable name shown on customer dashboard, e.g. Data Processed (GB)`
-  - **Type:** `Data type of the constraint value`
-  - **Unit:** `Unit of measurement displayed to customers, e.g. GB, Mbps, Endpoints`
-  - **Required:** `Whether this constraint must be set when provisioning a customer entitlement`
+- **Field layout (Review tab):**
+  - **Row 1:** SKU Name | Product (from `GET /api/products`).
+  - **Row 2:** Pricing Model | Min Commitment (months).
+  - **Row 3:** Currency | Price per Unit | Unit (three equal columns, left to right).
+  - **Row 4:** Freemium Limit (single field row).
+- **Product change:** Changing **Product** clears **`required_flags`**, **`optional_flags`**, and
+  **`constraint_definitions`**, resets SKU validation state (banners cleared, **Publish SKU**
+  disabled until **Validate SKU** succeeds again), and reloads the Usage Tracking checklist for
+  the new product’s **`supported_constraints`**.
+- **Flag filtering by product:** **Required Flags** and **Optional Flags** only list flags whose
+  `flag_id` appears in the selected product’s **`available_flags`** (from `GET /api/products`).
+  When **no product** is selected, **all** flags are shown. When the product changes, any checked
+  flags that are not in the new product’s **`available_flags`** are cleared; those flags disappear
+  from the lists until a product that includes them is selected again.
+
+#### Usage Tracking (replaces “Constraint definitions” on Review)
+
+The former constraint-definitions block is labeled **Usage Tracking**. It is a **checklist of every
+constraint** the selected product supports — not a free-form add-row table and **not** an
+“Add Metric” flow: all catalog rows are visible; users **Include** / un-include to control what
+goes into `constraint_definitions`. **The Add Metric button has been removed** — every supported
+constraint is listed in the checklist.
+
+- **Data load:** After a product is selected, the client calls  
+  **`GET /api/constraint-master?keys={product.supported_constraints joined as comma-separated keys}`**  
+  (same idea as `keys=` + that product’s supported key list). If no product is selected, the UI
+  shows *Select a product to see available constraints*.
+- **Each row:** **Include** checkbox (with tooltip: check to include this metric in the SKU;
+  included metrics appear as usage meters on the customer dashboard) | editable **Metric Name**
+  (maps to `label` / display name; pre-filled from **`constraint_master`** or preserved from the
+  LLM parse when that key was returned) | **Unit** (read-only, from master) | **Data Type**
+  (read-only, from master) | **Required** checkbox. The master **description** is exposed as a
+  tooltip on the metric name field (`title`). A **header row** labels columns **INCLUDE**, **METRIC
+  NAME**, **UNIT**, **DATA TYPE**, **REQUIRED** (small uppercase gray styling); each header has a
+  `title` tooltip (include column matches the Include checkbox tooltip; others explain metric name
+  editing, fixed unit, storage type, and provisioning requirement).
+- **Auto-selection priority** when the checklist is populated (after product selection and/or
+  schema generation, with client-side hydration):
+  1. **LLM returned this `constraint_key` in `constraint_definitions`** — keep it included and use
+     the LLM’s **label** and **required** (and other fields) for that row.
+  2. **LLM did not return it**, but the key **matches the SKU unit pattern** (e.g. `unit='GB'` →
+     `usage_gb`, `SEAT`/`SEATS` → `seat_count`, `ENDPOINT`/`ENDPOINTS` → `endpoint_count`,
+     `MBPS` → `bandwidth_mbps`, `USERS` → `mobile_user_count`, `CREDIT`/`CREDITS` → `credit_pool`,
+     `DAYS` → `data_retention_days`) — **pre-check** with **`required: true`** and display name from
+     **`constraint_master`**.
+  3. **Otherwise** — row starts **unchecked** until the user checks **Include**.
+
+#### BRMS (SKU draft validation)
+
+- **Library:** `json-rules-engine` in **`lib/rules/sku-rules.ts`**, exported **`validateSkuDraft`**
+  builds facts from the draft only (**`SkuFacts`**: `pricing_model`, `freemium_limit`,
+  `min_commitment_months`, `unit`, `price_per_unit`, `constraint_definitions_count`) — **no custom
+  fact types** beyond that shape.
+- **Rules (exactly five):** `freemium-requires-limit`, `freemium-no-commitment`,
+  `usage-tiered-requires-unit`, `price-must-be-positive`, `metered-requires-constraints`.
+- **Review tab:** **Validate SKU** calls **`POST /api/validate-sku`** with **`{ draft, product_id }`**.
+  **Green** banner on success (*SKU validation passed — ready to publish*); **red** list of
+  messages on failure. **Publish SKU** is **disabled** until validation passes. **Any** change to
+  the form or selected product after a successful validation clears validation state (banner and
+  pass flag), so the user must validate again before publishing.
+
+- **Notes:** full-width textarea below Usage Tracking (above Raw AI Response).
+
 - **Raw AI Response:** collapsible section (collapsed by default) with toggle **"Show Raw AI
   Output"**; when expanded, shows the **raw model text** (`raw` from the parse response) in a
   monospace block before JSON parsing in the route
