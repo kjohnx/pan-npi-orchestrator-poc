@@ -100,7 +100,19 @@ export default function DashboardPage() {
       setError("");
       try {
         const response = await fetch(`/api/entitlements?account_id=${selectedAccountId}`);
-        const json = (await response.json()) as { data?: Entitlement[]; error?: string };
+        const rawText = await response.text();
+        let json: { data?: Entitlement[]; error?: string };
+        try {
+          json = rawText ? (JSON.parse(rawText) as { data?: Entitlement[]; error?: string }) : {};
+        } catch {
+          // eslint-disable-next-line no-console -- intentional diagnostics for non-JSON (e.g. HTML error page from wrong dev port)
+          console.error("Entitlements API: failed to parse JSON", {
+            status: response.status,
+            url: response.url,
+            rawText,
+          });
+          throw new Error("Server returned invalid JSON (check console for raw response).");
+        }
         if (!response.ok) {
           throw new Error(json.error ?? "Failed to load entitlements.");
         }

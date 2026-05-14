@@ -1,3 +1,4 @@
+// Dead code — replaced by /api/npi-chat. Retained temporarily for rollback safety. Delete after npi-chat is confirmed stable.
 import { NextRequest, NextResponse } from "next/server";
 import { getDb } from "@/lib/db/client";
 import { parseJson } from "@/lib/api/utils";

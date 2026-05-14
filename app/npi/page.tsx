@@ -6,6 +6,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 const DEFAULT_CONCEPT =
   "We are launching AI Access Security for Enterprise customers. It governs employee use of generative AI tools across the organization. Usage-based pricing at $15 per seat, 12-month minimum commitment. Track licensed seat count as the usage constraint. Enable the Policy Enforcement flag by default, with Shadow AI Detection as an optional add-on.";
 
+const CHAT_DISABLED_MESSAGE =
+  "SKU published successfully. This conversation has ended. Click Edit SKU on the left to modify the published SKU and resume the conversation.";
+
 const ACCOUNT_IDS = ["ACC-001", "ACC-002", "ACC-003"] as const;
 
 const PRICING_MODELS = ["USAGE", "FLAT", "TIERED", "FREEMIUM"] as const;
@@ -61,6 +64,7 @@ type SkuDraft = {
   optional_flags: string[];
   constraint_definitions: ConstraintDefinition[];
   notes: string;
+  product_id: string | null;
 };
 
 type Product = {
@@ -193,21 +197,20 @@ function deriveImpactReason(
   return `Offering change for this account: current entitlement is ${currentModel}; draft new SKU is ${draftModel || "unspecified"}.`;
 }
 
-type Tab = "input" | "review" | "published";
-
 function getEmptyDraft(): SkuDraft {
   return {
     name: "",
-    pricing_model: "USAGE",
+    pricing_model: "",
     price_per_unit: null,
     price_currency: "USD",
-    unit: "GB",
+    unit: "",
     freemium_limit: null,
-    min_commitment_months: 12,
+    min_commitment_months: null,
     required_flags: [],
     optional_flags: [],
     constraint_definitions: [],
     notes: "",
+    product_id: null,
   };
 }
 
@@ -248,42 +251,53 @@ function constraintKeyMatchesDraftUnit(draftUnit: string, constraintKey: string)
   return false;
 }
 
+/** Split on `**` and alternate normal / bold for simple assistant markdown. */
+function renderAssistantBoldSegments(content: string) {
+  const parts = content.split("**");
+  return parts.map((part, index) =>
+    index % 2 === 0 ? (
+      <span key={index}>{part}</span>
+    ) : (
+      <strong key={index} className="font-semibold text-white">
+        {part}
+      </strong>
+    ),
+  );
+}
+
 export default function NpiPage() {
-  const [activeTab, setActiveTab] = useState<Tab>("input");
-  const [concept, setConcept] = useState(DEFAULT_CONCEPT);
+  // Production: persist conversation history in npi_submissions table alongside raw_input and generated_schema
+  const [messages, setMessages] = useState<Array<{ role: "user" | "assistant"; content: string }>>([]);
+  const [chatInput, setChatInput] = useState(DEFAULT_CONCEPT);
+  const [isChatLoading, setIsChatLoading] = useState(false);
+  const [isChatDisabled, setIsChatDisabled] = useState(false);
+  const [lastRawResponse, setLastRawResponse] = useState<string>("");
   const [draft, setDraft] = useState<SkuDraft>(getEmptyDraft());
-  const [productId, setProductId] = useState<string>("");
   const [products, setProducts] = useState<Product[]>([]);
+  const [availableConstraints, setAvailableConstraints] = useState<ConstraintMasterEntry[]>([]);
+  const [validationResult, setValidationResult] = useState<{ valid: boolean; errors: string[] } | null>(null);
   const [publishedSku, setPublishedSku] = useState<PublishedSku | null>(null);
   const [isModifyMode, setIsModifyMode] = useState(false);
-  const [isParsing, setIsParsing] = useState(false);
+  const [impactRows, setImpactRows] = useState<ImpactRow[]>([]);
+  const [impactCount, setImpactCount] = useState<number | null>(null);
+  const [impactExpanded, setImpactExpanded] = useState(false);
+  const [provisionAccountId, setProvisionAccountId] = useState("ACC-001");
+  const [provisionStatus, setProvisionStatus] = useState<"idle" | "success" | "duplicate" | "error">("idle");
   const [isPublishing, setIsPublishing] = useState(false);
   const [isPreviewingImpact, setIsPreviewingImpact] = useState(false);
-  const [impactCount, setImpactCount] = useState<number | null>(null);
-  const [impactRows, setImpactRows] = useState<ImpactRow[]>([]);
-  const [impactDrilldownOpen, setImpactDrilldownOpen] = useState(false);
+  const [isValidatingSku, setIsValidatingSku] = useState(false);
+  const [isProvisioning, setIsProvisioning] = useState(false);
   const [statusMessage, setStatusMessage] = useState("");
   const [error, setError] = useState("");
-  const [rawAiOutput, setRawAiOutput] = useState<string | null>(null);
   const [isRawOpen, setIsRawOpen] = useState(false);
-  const [hasGeneratedSchema, setHasGeneratedSchema] = useState(false);
-  const [provisionAccountId, setProvisionAccountId] = useState<string>("ACC-001");
-  const [isProvisioning, setIsProvisioning] = useState(false);
-  const [provisionSuccessCompany, setProvisionSuccessCompany] = useState<string | null>(null);
-  const [provisionWarning, setProvisionWarning] = useState<string>("");
-  const [availableConstraints, setAvailableConstraints] = useState<ConstraintMasterEntry[]>([]);
   const [skuValidationPassed, setSkuValidationPassed] = useState(false);
-  const [skuValidationNotice, setSkuValidationNotice] = useState<
-    | { type: "success"; message: string }
-    | { type: "error"; messages: string[] }
-    | null
-  >(null);
-  const [isValidatingSku, setIsValidatingSku] = useState(false);
   const validatedFingerprintRef = useRef<string | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const chatInputRef = useRef<HTMLTextAreaElement>(null);
 
   const validationFingerprint = useMemo(
-    () => JSON.stringify({ draft, productId }),
-    [draft, productId],
+    () => JSON.stringify({ draft, product_id: draft.product_id }),
+    [draft],
   );
 
   useEffect(() => {
@@ -296,13 +310,14 @@ export default function NpiPage() {
     if (validationFingerprint !== validatedFingerprintRef.current) {
       validatedFingerprintRef.current = null;
       setSkuValidationPassed(false);
-      setSkuValidationNotice(null);
+      setValidationResult(null);
     }
   }, [validationFingerprint]);
 
   useEffect(() => {
     let cancelled = false;
     async function loadConstraints() {
+      const productId = draft.product_id?.trim() ?? "";
       if (!productId) {
         if (!cancelled) setAvailableConstraints([]);
         return;
@@ -324,10 +339,11 @@ export default function NpiPage() {
     return () => {
       cancelled = true;
     };
-  }, [productId, products]);
+  }, [draft.product_id, products]);
 
   useEffect(() => {
-    if (!productId.trim() || availableConstraints.length === 0) return;
+    const pid = draft.product_id?.trim() ?? "";
+    if (!pid || availableConstraints.length === 0) return;
     const catalogKeys = new Set(availableConstraints.map((m) => m.constraint_key));
     setDraft((current) => {
       const filtered = current.constraint_definitions.filter((d) => catalogKeys.has(d.key));
@@ -345,137 +361,105 @@ export default function NpiPage() {
       }
       return { ...current, constraint_definitions: next };
     });
-  }, [availableConstraints, productId, draft.unit]);
+  }, [availableConstraints, draft.product_id, draft.unit]);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, isChatLoading]);
 
   const selectedProductName = useMemo(() => {
-    return products.find((product) => product.product_id === productId)?.name ?? null;
-  }, [productId, products]);
+    const id = draft.product_id?.trim() ?? "";
+    return products.find((product) => product.product_id === id)?.name ?? null;
+  }, [draft.product_id, products]);
 
   const visibleFlagOptions = useMemo(() => {
-    if (!productId.trim()) return [...FLAG_OPTIONS];
-    const product = products.find((p) => p.product_id === productId);
+    const pid = draft.product_id?.trim() ?? "";
+    if (!pid) return [...FLAG_OPTIONS];
+    const product = products.find((p) => p.product_id === pid);
     const allowed = new Set(product?.available_flags ?? []);
     return FLAG_OPTIONS.filter((f) => allowed.has(f.id));
-  }, [productId, products]);
+  }, [draft.product_id, products]);
 
   async function fetchProducts() {
     const response = await fetch("/api/products");
     if (!response.ok) {
       throw new Error("Failed to load products.");
     }
-    const json = (await response.json()) as { data: Product[] };
-    setProducts(json.data ?? []);
-    if (!productId && json.data?.length) {
-      setProductId(json.data[0].product_id);
-    }
+    const json = (await response.json()) as Product[] | { data?: Product[] };
+    setProducts(Array.isArray(json) ? json : (json.data ?? []));
+  }
+
+  function mergeFormState(incoming: Record<string, unknown>) {
+    setDraft((prev) => {
+      const next = { ...prev };
+      for (const key of Object.keys(incoming)) {
+        const val = incoming[key];
+        if (val === "__unknown__" || val === "unknown") continue;
+        if (val === null) {
+          (next as Record<string, unknown>)[key] = null;
+        } else {
+          (next as Record<string, unknown>)[key] = val;
+        }
+      }
+      return next as SkuDraft;
+    });
   }
 
   function handleProductChange(nextProductId: string) {
+    const trimmed = nextProductId.trim();
     setDraft((current) => {
-      const nextProduct = products.find((p) => p.product_id === nextProductId);
-      const allowed =
-        nextProductId.trim() && nextProduct ? new Set(nextProduct.available_flags ?? []) : null;
+      const nextProduct = products.find((p) => p.product_id === trimmed);
+      const allowed = trimmed && nextProduct ? new Set(nextProduct.available_flags ?? []) : null;
       return {
         ...current,
+        product_id: trimmed || null,
         required_flags: allowed ? current.required_flags.filter((id) => allowed.has(id)) : [],
         optional_flags: allowed ? current.optional_flags.filter((id) => allowed.has(id)) : [],
         constraint_definitions: [],
       };
     });
-    setProductId(nextProductId);
     setSkuValidationPassed(false);
-    setSkuValidationNotice(null);
+    setValidationResult(null);
     validatedFingerprintRef.current = null;
   }
 
-  async function handleGenerateSchema() {
-    setError("");
-    setStatusMessage("");
-    setImpactCount(null);
-    setImpactRows([]);
-    setImpactDrilldownOpen(false);
-    setIsModifyMode(false);
-    setIsParsing(true);
-    setRawAiOutput(null);
-    setIsRawOpen(false);
-    setSkuValidationPassed(false);
-    setSkuValidationNotice(null);
-    validatedFingerprintRef.current = null;
-
+  async function handleSendMessage() {
+    if (!chatInput.trim() || isChatLoading || isChatDisabled) return;
+    const userMessage = { role: "user" as const, content: chatInput.trim() };
+    const updatedMessages = [...messages, userMessage];
+    setMessages(updatedMessages);
+    setChatInput("");
+    setIsChatLoading(true);
     try {
-      if (!concept.trim()) {
-        throw new Error("Please describe a product concept.");
-      }
-
-      if (!products.length) {
-        await fetchProducts();
-      }
-
-      const response = await fetch("/api/npi-parse", {
+      const response = await fetch("/api/npi-chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          concept,
-          ...(productId.trim() ? { product_id: productId } : {}),
+          messages: updatedMessages,
+          current_form_state: draft,
+          product_id: draft.product_id || null,
         }),
       });
-
-      const json = (await response.json()) as {
-        data?: Partial<SkuDraft>;
-        raw?: string;
+      const data = (await response.json()) as {
+        message?: string;
+        form_state?: Record<string, unknown>;
         error?: string;
-        detail?: string;
       };
-
-      if (typeof json.raw === "string") {
-        setRawAiOutput(json.raw);
+      setLastRawResponse(JSON.stringify(data, null, 2));
+      if (typeof data.message === "string" && data.message.trim()) {
+        const assistantText = data.message.trim();
+        setMessages((prev) => [...prev, { role: "assistant", content: assistantText }]);
       }
-
-      if (!response.ok || !json.data) {
-        throw new Error(json.error ?? json.detail ?? "Schema generation failed.");
+      if (data.form_state) {
+        mergeFormState(data.form_state);
       }
-
-      const ai = json.data;
-      const normalized: SkuDraft = {
-        name: ai.name ?? "",
-        pricing_model:
-          (ai.pricing_model as SkuDraft["pricing_model"]) && PRICING_MODELS.includes(ai.pricing_model as any)
-            ? (ai.pricing_model as SkuDraft["pricing_model"])
-            : "USAGE",
-        price_per_unit: typeof ai.price_per_unit === "number" ? ai.price_per_unit : null,
-        price_currency: "USD",
-        unit:
-          (ai.unit as SkuDraft["unit"]) && UNITS.includes(ai.unit as any)
-            ? (ai.unit as SkuDraft["unit"])
-            : "GB",
-        freemium_limit: typeof ai.freemium_limit === "number" ? ai.freemium_limit : null,
-        min_commitment_months:
-          typeof ai.min_commitment_months === "number" ? ai.min_commitment_months : 12,
-        required_flags: Array.isArray(ai.required_flags) ? ai.required_flags.filter(Boolean) : [],
-        optional_flags: Array.isArray(ai.optional_flags) ? ai.optional_flags.filter(Boolean) : [],
-        constraint_definitions: Array.isArray(ai.constraint_definitions)
-          ? ai.constraint_definitions.map((item) => ({
-              key: typeof item?.key === "string" ? item.key : "",
-              label: typeof item?.label === "string" ? item.label : "",
-              type:
-                item?.type && CONSTRAINT_TYPES.includes(item.type as any)
-                  ? (item.type as ConstraintDefinition["type"])
-                  : "NUMERIC",
-              unit: typeof item?.unit === "string" ? item.unit : "",
-              required: Boolean(item?.required),
-            }))
-          : [],
-        notes: typeof ai.notes === "string" ? ai.notes : "",
-      };
-
-      setDraft(normalized);
-      setHasGeneratedSchema(true);
-      setActiveTab("review");
-      setStatusMessage("Schema generated. Review and publish when ready.");
-    } catch (parseError) {
-      setError(parseError instanceof Error ? parseError.message : "Unexpected parsing error.");
+    } catch {
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", content: "Sorry, something went wrong. Please try again." },
+      ]);
     } finally {
-      setIsParsing(false);
+      setIsChatLoading(false);
     }
   }
 
@@ -483,7 +467,8 @@ export default function NpiPage() {
     setError("");
     setStatusMessage("");
     setIsPreviewingImpact(true);
-    setImpactDrilldownOpen(false);
+    setImpactExpanded(false);
+    setImpactCount(null);
 
     try {
       const responses = await Promise.all(
@@ -498,6 +483,7 @@ export default function NpiPage() {
       );
 
       const rows: ImpactRow[] = [];
+      const productId = draft.product_id?.trim() ?? "";
 
       for (const list of responses) {
         for (const entitlement of list) {
@@ -531,7 +517,7 @@ export default function NpiPage() {
       const uniqueAccountIds = new Set(rows.map((r) => r.accountId));
       setImpactRows(rows);
       setImpactCount(uniqueAccountIds.size);
-      setImpactDrilldownOpen(false);
+      setImpactExpanded(false);
       setStatusMessage(`Impact preview complete: ${uniqueAccountIds.size} affected account(s).`);
     } catch (previewError) {
       setError(previewError instanceof Error ? previewError.message : "Impact preview failed.");
@@ -554,9 +540,12 @@ export default function NpiPage() {
         throw new Error("SKU name is required.");
       }
 
+      const productId = draft.product_id?.trim() ?? "";
       if (!productId) {
         throw new Error("Select a product before publishing.");
       }
+
+      const rawInput = updatedMessagesForPublish();
 
       const payload = {
         product_id: productId,
@@ -571,7 +560,7 @@ export default function NpiPage() {
         required_flags: draft.required_flags,
         optional_flags: draft.optional_flags,
         constraint_definitions: draft.constraint_definitions,
-        raw_input: concept,
+        raw_input: rawInput,
         submitted_by: "npi-panel-demo",
       };
 
@@ -590,17 +579,21 @@ export default function NpiPage() {
       }
 
       setPublishedSku(json.data);
-      setActiveTab("published");
       setIsModifyMode(false);
       setSkuValidationPassed(false);
-      setSkuValidationNotice(null);
+      setValidationResult(null);
       validatedFingerprintRef.current = null;
+      setIsChatDisabled(true);
       setStatusMessage(method === "POST" ? "SKU published successfully." : "SKU updated successfully.");
     } catch (publishError) {
       setError(publishError instanceof Error ? publishError.message : "Unexpected publish error.");
     } finally {
       setIsPublishing(false);
     }
+  }
+
+  function updatedMessagesForPublish(): string {
+    return messages.map((m) => `[${m.role}] ${m.content}`).join("\n\n");
   }
 
   function formatYyyyMmDd(date: Date): string {
@@ -614,8 +607,7 @@ export default function NpiPage() {
     if (!publishedSku) return;
 
     setError("");
-    setProvisionWarning("");
-    setProvisionSuccessCompany(null);
+    setProvisionStatus("idle");
     setIsProvisioning(true);
 
     try {
@@ -652,16 +644,15 @@ export default function NpiPage() {
 
       const json = (await response.json()) as { error?: string };
       if (response.status === 409 && json.error === "duplicate") {
-        setProvisionWarning("This account already has an active entitlement for this SKU.");
+        setProvisionStatus("duplicate");
         return;
       }
       if (!response.ok) {
+        setProvisionStatus("error");
         throw new Error(json.error ?? "Provisioning failed.");
       }
 
-      const companyName =
-        ACCOUNT_OPTIONS.find((account) => account.id === provisionAccountId)?.company ?? provisionAccountId;
-      setProvisionSuccessCompany(companyName);
+      setProvisionStatus("success");
       setProvisionAccountId("ACC-001");
     } catch (provisionError) {
       setError(provisionError instanceof Error ? provisionError.message : "Provisioning failed.");
@@ -711,7 +702,8 @@ export default function NpiPage() {
     setError("");
     setIsValidatingSku(true);
     try {
-      if (!productId.trim()) {
+      const productId = draft.product_id?.trim() ?? "";
+      if (!productId) {
         throw new Error("Select a product before validating.");
       }
       const response = await fetch("/api/validate-sku", {
@@ -726,663 +718,666 @@ export default function NpiPage() {
       if (json.valid) {
         validatedFingerprintRef.current = validationFingerprint;
         setSkuValidationPassed(true);
-        setSkuValidationNotice({
-          type: "success",
-          message: "SKU validation passed — ready to publish",
-        });
+        setValidationResult({ valid: true, errors: [] });
       } else {
         validatedFingerprintRef.current = null;
         setSkuValidationPassed(false);
-        setSkuValidationNotice({ type: "error", messages: json.errors ?? [] });
+        setValidationResult({ valid: false, errors: json.errors ?? [] });
       }
     } catch (validateError) {
       validatedFingerprintRef.current = null;
       setSkuValidationPassed(false);
-      setSkuValidationNotice(null);
+      setValidationResult(null);
       setError(validateError instanceof Error ? validateError.message : "Validation failed.");
     } finally {
       setIsValidatingSku(false);
     }
   }
 
-  const tabs: Array<{ id: Tab; label: string; enabled: boolean }> = [
-    { id: "input", label: "Input", enabled: true },
-    { id: "review", label: "Review", enabled: hasGeneratedSchema },
-    { id: "published", label: "Published", enabled: Boolean(publishedSku) },
-  ];
+  function handleEditSku() {
+    if (!publishedSku) return;
+    setIsModifyMode(true);
+    setIsChatDisabled(false);
+    setDraft((current) => ({
+      ...current,
+      name: publishedSku.name,
+      pricing_model: (publishedSku.pricing_model as SkuDraft["pricing_model"]) ?? current.pricing_model,
+      price_per_unit: publishedSku.price_per_unit,
+      unit: (publishedSku.unit as SkuDraft["unit"]) ?? current.unit,
+      freemium_limit: publishedSku.freemium_limit,
+      min_commitment_months: publishedSku.min_commitment_months,
+      required_flags: publishedSku.required_flags ?? [],
+      optional_flags: publishedSku.optional_flags ?? [],
+      constraint_definitions:
+        (publishedSku.constraint_definitions as ConstraintDefinition[]) ?? current.constraint_definitions,
+      product_id: publishedSku.product_id ?? current.product_id,
+    }));
+    setMessages((prev) => [
+      ...prev,
+      { role: "assistant", content: "Edit mode enabled. Describe what you would like to change about this SKU." },
+    ]);
+    setSkuValidationPassed(false);
+    setValidationResult(null);
+    validatedFingerprintRef.current = null;
+    requestAnimationFrame(() => {
+      chatInputRef.current?.focus();
+      chatInputRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
+  }
+
+  const publishedSectionHidden = !publishedSku;
 
   return (
-    <main className="min-h-screen bg-slate-950 text-slate-100">
-      <div className="mx-auto max-w-6xl px-6 py-10">
-        <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-8 shadow-2xl shadow-blue-950/30">
-          <div className="mb-8 flex flex-wrap items-center justify-between gap-4">
-            <div>
-              <p className="text-sm uppercase tracking-[0.2em] text-slate-400">Palo Alto Networks</p>
-              <h1 className="mt-2 text-3xl font-semibold text-white">NPI Fast-Track Tool</h1>
-              <p className="mt-2 text-sm text-slate-300">
-                AI-assisted SKU publishing workflow for rapid product launch decisions.
+    <main className="flex h-screen overflow-hidden bg-gray-950 text-slate-100">
+      <div className="w-1/2 overflow-y-auto border-r border-gray-800 p-6">
+        <div className="mb-8">
+          <p className="text-sm uppercase tracking-[0.2em] text-gray-400">PALO ALTO NETWORKS</p>
+          <h1 className="mt-2 text-3xl font-semibold text-white">NPI Fast-Track Tool</h1>
+          <p className="mt-2 text-sm text-gray-300">
+            AI-assisted SKU publishing workflow for rapid product launch decisions.
+          </p>
+        </div>
+
+        {statusMessage && (
+          <div className="mb-5 rounded-lg border border-emerald-700/40 bg-emerald-950/40 px-4 py-3 text-sm text-emerald-200">
+            {statusMessage}
+          </div>
+        )}
+        {error && (
+          <div className="mb-5 rounded-lg border border-rose-700/40 bg-rose-950/40 px-4 py-3 text-sm text-rose-200">
+            {error}
+          </div>
+        )}
+
+        <section className="space-y-7">
+          <div className="grid gap-4 md:grid-cols-2">
+            <label className="block">
+              <span className="mb-2 block text-sm font-medium text-slate-200">SKU Name</span>
+              <input
+                value={draft.name}
+                onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))}
+                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-blue-500 focus:ring-2"
+              />
+            </label>
+            <label className="block">
+              <span className="mb-2 block text-sm font-medium text-slate-200">Product</span>
+              <select
+                value={draft.product_id ?? ""}
+                onChange={(event) => handleProductChange(event.target.value)}
+                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-blue-500 focus:ring-2"
+              >
+                <option value="">Select product</option>
+                {products.map((product) => (
+                  <option key={product.product_id} value={product.product_id}>
+                    {product.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <div className="grid gap-4 md:grid-cols-2">
+            <label className="block">
+              <span className="mb-2 block text-sm font-medium text-slate-200">Pricing Model</span>
+              <select
+                value={draft.pricing_model}
+                onChange={(event) =>
+                  setDraft((current) => ({
+                    ...current,
+                    pricing_model: event.target.value as SkuDraft["pricing_model"],
+                  }))
+                }
+                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-blue-500 focus:ring-2"
+              >
+                <option value="">Select pricing model</option>
+                {PRICING_MODELS.map((model) => (
+                  <option key={model} value={model}>
+                    {model}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="block">
+              <span className="mb-2 block text-sm font-medium text-slate-200">Min Commitment (months)</span>
+              <input
+                value={draft.min_commitment_months ?? ""}
+                onChange={(event) =>
+                  setDraft((current) => ({
+                    ...current,
+                    min_commitment_months: safeNumber(event.target.value),
+                  }))
+                }
+                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-blue-500 focus:ring-2"
+              />
+            </label>
+          </div>
+
+          <div className="grid gap-4 md:grid-cols-3">
+            <label className="block">
+              <span className="mb-2 block text-sm font-medium text-slate-200">Currency</span>
+              <input
+                value={draft.price_currency}
+                onChange={(event) =>
+                  setDraft((current) => ({
+                    ...current,
+                    price_currency: event.target.value.toUpperCase() as "USD",
+                  }))
+                }
+                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-blue-500 focus:ring-2"
+              />
+            </label>
+            <label className="block">
+              <span className="mb-2 block text-sm font-medium text-slate-200">Price per Unit</span>
+              <input
+                type="number"
+                value={draft.price_per_unit ?? ""}
+                onChange={(event) =>
+                  setDraft((current) => ({ ...current, price_per_unit: safeNumber(event.target.value) }))
+                }
+                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-blue-500 focus:ring-2"
+              />
+            </label>
+            <label className="block">
+              <span className="mb-2 block text-sm font-medium text-slate-200">Unit</span>
+              <select
+                value={draft.unit}
+                onChange={(event) =>
+                  setDraft((current) => ({ ...current, unit: event.target.value as SkuDraft["unit"] }))
+                }
+                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-blue-500 focus:ring-2"
+              >
+                <option value="">Select unit</option>
+                {UNITS.map((unit) => (
+                  <option key={unit} value={unit}>
+                    {unit}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <label className="block">
+            <span className="mb-2 block text-sm font-medium text-slate-200">Freemium Limit</span>
+            <input
+              type="number"
+              value={draft.freemium_limit ?? ""}
+              onChange={(event) =>
+                setDraft((current) => ({ ...current, freemium_limit: safeNumber(event.target.value) }))
+              }
+              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-blue-500 focus:ring-2 md:max-w-md"
+            />
+          </label>
+
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
+              <p className="mb-3 text-sm font-medium text-slate-200">Required Flags</p>
+              <div className="space-y-2">
+                {visibleFlagOptions.map((flag) => (
+                  <label key={flag.id} className="flex items-center gap-2 text-sm text-slate-300">
+                    <input
+                      type="checkbox"
+                      checked={draft.required_flags.includes(flag.id)}
+                      onChange={() => toggleFlag(flag.id, "required_flags")}
+                    />
+                    {flag.label}
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
+              <p className="mb-3 text-sm font-medium text-slate-200">Optional Flags</p>
+              <div className="space-y-2">
+                {visibleFlagOptions.map((flag) => (
+                  <label key={flag.id} className="flex items-center gap-2 text-sm text-slate-300">
+                    <input
+                      type="checkbox"
+                      checked={draft.optional_flags.includes(flag.id)}
+                      onChange={() => toggleFlag(flag.id, "optional_flags")}
+                    />
+                    {flag.label}
+                  </label>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
+            <div className="mb-3">
+              <p className="text-sm font-medium text-slate-200">Usage Tracking</p>
+              <p className="mt-1 max-w-3xl text-xs text-slate-400">
+                Select what to measure for this product. These metrics appear as usage meters on the customer
+                dashboard. Display Name can be customized — Unit and Data Type are fixed by the product definition.
               </p>
             </div>
-            <span className="rounded-full bg-slate-800 px-4 py-2 text-xs font-semibold tracking-wide text-slate-200">
-              3-Tab Workflow
-            </span>
-          </div>
 
-          <div className="mb-8 grid gap-2 rounded-xl border border-slate-800 bg-slate-950/60 p-2 md:grid-cols-3">
-            {tabs.map((tab) => {
-              const isActive = activeTab === tab.id;
-              return (
-                <button
-                  key={tab.id}
-                  type="button"
-                  disabled={!tab.enabled}
-                  onClick={() => setActiveTab(tab.id)}
-                  className={[
-                    "rounded-lg px-4 py-3 text-sm font-semibold transition",
-                    isActive
-                      ? "bg-blue-600 text-white"
-                      : tab.enabled
-                        ? "bg-slate-900 text-slate-200 hover:bg-slate-800"
-                        : "cursor-not-allowed bg-slate-900/40 text-slate-500",
-                  ].join(" ")}
-                >
-                  {tab.label}
-                </button>
-              );
-            })}
-          </div>
-
-          {statusMessage && (
-            <div className="mb-5 rounded-lg border border-emerald-700/40 bg-emerald-950/40 px-4 py-3 text-sm text-emerald-200">
-              {statusMessage}
-            </div>
-          )}
-          {error && (
-            <div className="mb-5 rounded-lg border border-rose-700/40 bg-rose-950/40 px-4 py-3 text-sm text-rose-200">
-              {error}
-            </div>
-          )}
-
-          {activeTab === "input" && (
-            <section className="space-y-6">
-              <label className="block">
-                <span className="mb-2 block text-sm font-medium text-slate-200">
-                  Describe your new product concept
-                </span>
-                <textarea
-                  value={concept}
-                  onChange={(event) => setConcept(event.target.value)}
-                  className="h-44 w-full rounded-xl border border-slate-700 bg-slate-950 p-4 text-sm text-slate-100 outline-none ring-blue-500 transition focus:ring-2"
-                />
-              </label>
-
-              <div className="flex items-center justify-end">
-                <button
-                  type="button"
-                  onClick={handleGenerateSchema}
-                  disabled={isParsing}
-                  className="rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {isParsing ? "Generating Schema..." : "Generate Schema"}
-                </button>
-              </div>
-            </section>
-          )}
-
-          {activeTab === "review" && (
-            <section className="space-y-7">
-              <div className="grid gap-4 md:grid-cols-2">
-                <label className="block">
-                  <span className="mb-2 block text-sm font-medium text-slate-200">SKU Name</span>
-                  <input
-                    value={draft.name}
-                    onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))}
-                    className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-blue-500 focus:ring-2"
-                  />
-                </label>
-                <label className="block">
-                  <span className="mb-2 block text-sm font-medium text-slate-200">Product</span>
-                  <select
-                    value={productId}
-                    onChange={(event) => handleProductChange(event.target.value)}
-                    className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-blue-500 focus:ring-2"
-                  >
-                    <option value="">Select product</option>
-                    {products.map((product) => (
-                      <option key={product.product_id} value={product.product_id}>
-                        {product.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-
-              <div className="grid gap-4 md:grid-cols-2">
-                <label className="block">
-                  <span className="mb-2 block text-sm font-medium text-slate-200">Pricing Model</span>
-                  <select
-                    value={draft.pricing_model}
-                    onChange={(event) =>
-                      setDraft((current) => ({
-                        ...current,
-                        pricing_model: event.target.value as SkuDraft["pricing_model"],
-                      }))
-                    }
-                    className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-blue-500 focus:ring-2"
-                  >
-                    {PRICING_MODELS.map((model) => (
-                      <option key={model} value={model}>
-                        {model}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="block">
-                  <span className="mb-2 block text-sm font-medium text-slate-200">Min Commitment (months)</span>
-                  <input
-                    value={draft.min_commitment_months ?? ""}
-                    onChange={(event) =>
-                      setDraft((current) => ({
-                        ...current,
-                        min_commitment_months: safeNumber(event.target.value),
-                      }))
-                    }
-                    className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-blue-500 focus:ring-2"
-                  />
-                </label>
-              </div>
-
-              <div className="grid gap-4 md:grid-cols-3">
-                <label className="block">
-                  <span className="mb-2 block text-sm font-medium text-slate-200">Currency</span>
-                  <input
-                    value={draft.price_currency}
-                    onChange={(event) =>
-                      setDraft((current) => ({
-                        ...current,
-                        price_currency: event.target.value.toUpperCase() as "USD",
-                      }))
-                    }
-                    className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-blue-500 focus:ring-2"
-                  />
-                </label>
-                <label className="block">
-                  <span className="mb-2 block text-sm font-medium text-slate-200">Price per Unit</span>
-                  <input
-                    value={draft.price_per_unit ?? ""}
-                    onChange={(event) =>
-                      setDraft((current) => ({ ...current, price_per_unit: safeNumber(event.target.value) }))
-                    }
-                    className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-blue-500 focus:ring-2"
-                  />
-                </label>
-                <label className="block">
-                  <span className="mb-2 block text-sm font-medium text-slate-200">Unit</span>
-                  <select
-                    value={draft.unit}
-                    onChange={(event) =>
-                      setDraft((current) => ({ ...current, unit: event.target.value as SkuDraft["unit"] }))
-                    }
-                    className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-blue-500 focus:ring-2"
-                  >
-                    {UNITS.map((unit) => (
-                      <option key={unit} value={unit}>
-                        {unit}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-
-              <div className="grid gap-4 md:grid-cols-2">
-                <label className="block">
-                  <span className="mb-2 block text-sm font-medium text-slate-200">Freemium Limit</span>
-                  <input
-                    value={draft.freemium_limit ?? ""}
-                    onChange={(event) =>
-                      setDraft((current) => ({ ...current, freemium_limit: safeNumber(event.target.value) }))
-                    }
-                    className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-blue-500 focus:ring-2"
-                  />
-                </label>
-                <div aria-hidden="true" className="hidden md:block" />
-              </div>
-
-              <div className="grid gap-4 md:grid-cols-2">
-                <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
-                  <p className="mb-3 text-sm font-medium text-slate-200">Required Flags</p>
-                  <div className="space-y-2">
-                    {visibleFlagOptions.map((flag) => (
-                      <label key={flag.id} className="flex items-center gap-2 text-sm text-slate-300">
-                        <input
-                          type="checkbox"
-                          checked={draft.required_flags.includes(flag.id)}
-                          onChange={() => toggleFlag(flag.id, "required_flags")}
-                        />
-                        {flag.label}
-                      </label>
-                    ))}
-                  </div>
-                </div>
-                <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
-                  <p className="mb-3 text-sm font-medium text-slate-200">Optional Flags</p>
-                  <div className="space-y-2">
-                    {visibleFlagOptions.map((flag) => (
-                      <label key={flag.id} className="flex items-center gap-2 text-sm text-slate-300">
-                        <input
-                          type="checkbox"
-                          checked={draft.optional_flags.includes(flag.id)}
-                          onChange={() => toggleFlag(flag.id, "optional_flags")}
-                        />
-                        {flag.label}
-                      </label>
-                    ))}
-                  </div>
-                </div>
-              </div>
-
-              <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
-                <div className="mb-3">
-                  <p className="text-sm font-medium text-slate-200">Usage Tracking</p>
-                  <p className="mt-1 max-w-3xl text-xs text-slate-400">
-                    Select what to measure for this product. These metrics appear as usage meters on the customer
-                    dashboard. Display Name can be customized — Unit and Data Type are fixed by the product definition.
-                  </p>
-                </div>
-
-                {!productId.trim() ? (
-                  <p className="text-sm text-slate-400">Select a product to see available constraints</p>
-                ) : (
-                  <div className="space-y-3">
-                    {availableConstraints.length === 0 && (
-                      <p className="text-sm text-slate-400">No constraint catalog entries for this product.</p>
-                    )}
-                    {availableConstraints.length > 0 && (
-                      <div className="hidden gap-3 px-3 py-1 md:grid md:grid-cols-12 md:items-end">
-                        <span
-                          className="md:col-span-2 text-xs font-semibold uppercase tracking-wide text-gray-400"
-                          title={HEADER_TOOLTIPS.include}
-                        >
-                          INCLUDE
-                        </span>
-                        <span
-                          className="md:col-span-4 text-xs font-semibold uppercase tracking-wide text-gray-400"
-                          title={HEADER_TOOLTIPS.metricName}
-                        >
-                          METRIC NAME
-                        </span>
-                        <span
-                          className="md:col-span-2 text-xs font-semibold uppercase tracking-wide text-gray-400"
-                          title={HEADER_TOOLTIPS.unit}
-                        >
-                          UNIT
-                        </span>
-                        <span
-                          className="md:col-span-2 text-xs font-semibold uppercase tracking-wide text-gray-400"
-                          title={HEADER_TOOLTIPS.dataType}
-                        >
-                          DATA TYPE
-                        </span>
-                        <span
-                          className="md:col-span-2 text-xs font-semibold uppercase tracking-wide text-gray-400"
-                          title={HEADER_TOOLTIPS.required}
-                        >
-                          REQUIRED
-                        </span>
-                      </div>
-                    )}
-                    {availableConstraints.map((master) => {
-                      const def = draft.constraint_definitions.find((d) => d.key === master.constraint_key);
-                      const included = Boolean(def);
-                      return (
-                        <div
-                          key={master.constraint_key}
-                          className="grid gap-3 rounded-lg border border-slate-800 p-3 md:grid-cols-12 md:items-center"
-                        >
-                          <label
-                            className="flex items-center gap-2 text-sm text-slate-300 md:col-span-2"
-                            title={INCLUDE_METRIC_TOOLTIP}
-                          >
-                            <input
-                              type="checkbox"
-                              checked={included}
-                              onChange={(event) => setMasterConstraintIncluded(master, event.target.checked)}
-                            />
-                            Include
-                          </label>
-                          <div className="md:col-span-4">
-                            <input
-                              aria-label="Metric name"
-                              title={master.description ?? undefined}
-                              value={def?.label ?? master.display_name}
-                              disabled={!included}
-                              onChange={(event) =>
-                                updateConstraintByKey(master.constraint_key, { label: event.target.value })
-                              }
-                              className="w-full rounded border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm disabled:cursor-not-allowed disabled:opacity-50"
-                            />
-                          </div>
-                          <div className="md:col-span-2">
-                            <p className="text-sm text-slate-200">{master.unit}</p>
-                          </div>
-                          <div className="md:col-span-2">
-                            <p className="text-sm text-slate-200">{master.data_type}</p>
-                          </div>
-                          <label className="flex items-center gap-2 text-sm text-slate-300 md:col-span-2">
-                            <input
-                              type="checkbox"
-                              checked={def?.required ?? false}
-                              disabled={!included}
-                              onChange={(event) =>
-                                updateConstraintByKey(master.constraint_key, { required: event.target.checked })
-                              }
-                            />
-                            Required
-                          </label>
-                        </div>
-                      );
-                    })}
+            {!(draft.product_id?.trim() ?? "") ? (
+              <p className="text-sm text-slate-400">Select a product to see available constraints</p>
+            ) : (
+              <div className="space-y-3">
+                {availableConstraints.length === 0 && (
+                  <p className="text-sm text-slate-400">No constraint catalog entries for this product.</p>
+                )}
+                {availableConstraints.length > 0 && (
+                  <div className="hidden gap-3 px-3 py-1 md:grid md:grid-cols-12 md:items-end">
+                    <span
+                      className="md:col-span-2 text-xs font-semibold uppercase tracking-wide text-gray-400"
+                      title={HEADER_TOOLTIPS.include}
+                    >
+                      INCLUDE
+                    </span>
+                    <span
+                      className="md:col-span-4 text-xs font-semibold uppercase tracking-wide text-gray-400"
+                      title={HEADER_TOOLTIPS.metricName}
+                    >
+                      METRIC NAME
+                    </span>
+                    <span
+                      className="md:col-span-2 text-xs font-semibold uppercase tracking-wide text-gray-400"
+                      title={HEADER_TOOLTIPS.unit}
+                    >
+                      UNIT
+                    </span>
+                    <span
+                      className="md:col-span-2 text-xs font-semibold uppercase tracking-wide text-gray-400"
+                      title={HEADER_TOOLTIPS.dataType}
+                    >
+                      DATA TYPE
+                    </span>
+                    <span
+                      className="md:col-span-2 text-xs font-semibold uppercase tracking-wide text-gray-400"
+                      title={HEADER_TOOLTIPS.required}
+                    >
+                      REQUIRED
+                    </span>
                   </div>
                 )}
-              </div>
-
-              <label className="block">
-                <span className="mb-2 block text-sm font-medium text-slate-200">Notes</span>
-                <textarea
-                  value={draft.notes}
-                  onChange={(event) => setDraft((current) => ({ ...current, notes: event.target.value }))}
-                  className="h-24 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-blue-500 focus:ring-2"
-                />
-              </label>
-
-              <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
-                <p className="mb-3 text-sm font-medium text-slate-200">Raw AI Response</p>
-                <button
-                  type="button"
-                  onClick={() => setIsRawOpen((v) => !v)}
-                  className="mb-3 flex w-full items-center justify-between rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-left text-sm font-semibold text-slate-100 transition hover:border-blue-400"
-                  aria-expanded={isRawOpen}
-                >
-                  <span>Show Raw AI Output</span>
-                  <span className="text-xs text-slate-400">{isRawOpen ? "−" : "+"}</span>
-                </button>
-
-                {isRawOpen && (
-                  <pre className="max-h-64 overflow-auto rounded-lg bg-slate-950 px-3 py-3 font-mono text-xs text-slate-200 ring-1 ring-slate-800">
-                    {rawAiOutput ?? ""}
-                  </pre>
-                )}
-              </div>
-
-              <div className="space-y-4">
-                {skuValidationNotice?.type === "success" && (
-                  <div className="rounded-lg border border-emerald-700/40 bg-emerald-950/40 px-4 py-3 text-sm text-emerald-200">
-                    {skuValidationNotice.message}
-                  </div>
-                )}
-                {skuValidationNotice?.type === "error" && (
-                  <div className="rounded-lg border border-rose-700/40 bg-rose-950/40 px-4 py-3 text-sm text-rose-200">
-                    <ul className="list-disc space-y-1 pl-5">
-                      {skuValidationNotice.messages.map((message, index) => (
-                        <li key={`${message}-${index}`}>{message}</li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-                <div className="flex flex-wrap justify-end gap-3">
-                  <button
-                    type="button"
-                    onClick={handleValidateSku}
-                    disabled={isValidatingSku}
-                    className="rounded-lg border border-blue-500/60 bg-blue-950/40 px-4 py-2 text-sm font-semibold text-blue-100 transition hover:border-blue-400 hover:bg-blue-950/60 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {isValidatingSku ? "Validating..." : "Validate SKU"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handlePreviewImpact}
-                    disabled={isPreviewingImpact}
-                    className="rounded-lg border border-slate-600 px-4 py-2 text-sm font-semibold text-slate-100 transition hover:border-blue-400 disabled:opacity-50"
-                  >
-                    {isPreviewingImpact ? "Previewing..." : "Preview Impact"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={publishSku}
-                    disabled={isPublishing || !skuValidationPassed}
-                    className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {isPublishing
-                      ? isModifyMode
-                        ? "Re-publishing..."
-                        : "Publishing..."
-                      : isModifyMode
-                        ? "Re-publish SKU"
-                        : "Publish SKU"}
-                  </button>
-                </div>
-
-                <div className="space-y-2">
-                  {impactCount !== null && (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() => setImpactDrilldownOpen((open) => !open)}
-                        className="rounded-full border border-amber-500/40 bg-amber-950/40 px-3 py-1 text-left text-sm font-medium text-amber-200 transition hover:border-amber-400 hover:bg-amber-950/60"
-                        aria-expanded={impactDrilldownOpen}
+                {availableConstraints.map((master) => {
+                  const def = draft.constraint_definitions.find((d) => d.key === master.constraint_key);
+                  const included = Boolean(def);
+                  return (
+                    <div
+                      key={master.constraint_key}
+                      className="grid gap-3 rounded-lg border border-slate-800 p-3 md:grid-cols-12 md:items-center"
+                    >
+                      <label
+                        className="flex items-center gap-2 text-sm text-slate-300 md:col-span-2"
+                        title={INCLUDE_METRIC_TOOLTIP}
                       >
-                        {impactCount} account(s) affected
-                        <span className="ml-2 text-xs text-amber-300/90">
-                          {impactDrilldownOpen ? "Hide details" : "Show details"}
-                        </span>
-                      </button>
-                      {impactCount > 0 && !impactDrilldownOpen && (
-                        <p className="text-xs text-slate-500">Click the summary badge to view affected accounts and SKUs.</p>
-                      )}
-                      {impactDrilldownOpen && (
-                        <div className="max-h-96 overflow-auto rounded-xl border border-slate-800 bg-slate-950/80 shadow-inner shadow-black/20">
-                          <table className="min-w-full text-left text-sm text-slate-200">
-                            <thead className="sticky top-0 z-10 bg-slate-900 text-xs font-semibold uppercase tracking-wide text-slate-400">
-                              <tr>
-                                <th className="px-3 py-2">Account ID</th>
-                                <th className="px-3 py-2">Company Name</th>
-                                <th className="px-3 py-2">Tier</th>
-                                <th className="px-3 py-2">Affected SKU ID</th>
-                                <th className="px-3 py-2">Impact Reason</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {impactRows.length === 0 ? (
-                                <tr>
-                                  <td colSpan={5} className="px-3 py-4 text-slate-400">
-                                    No matching active entitlements for this preview.
-                                  </td>
-                                </tr>
-                              ) : (
-                                impactRows.map((row, index) => (
-                                  <tr key={`${row.accountId}-${row.skuId}-${index}`} className="border-t border-slate-800">
-                                    <td className="px-3 py-2 font-mono text-xs">{row.accountId}</td>
-                                    <td className="px-3 py-2">{row.companyName}</td>
-                                    <td className="px-3 py-2">{row.tier}</td>
-                                    <td className="px-3 py-2 font-mono text-xs">{row.skuId}</td>
-                                    <td className="max-w-md px-3 py-2 text-slate-300">{row.impactReason}</td>
-                                  </tr>
-                                ))
-                              )}
-                            </tbody>
-                          </table>
-                        </div>
-                      )}
-                    </>
-                  )}
-                </div>
+                        <input
+                          type="checkbox"
+                          checked={included}
+                          onChange={(event) => setMasterConstraintIncluded(master, event.target.checked)}
+                        />
+                        Include
+                      </label>
+                      <div className="md:col-span-4">
+                        <input
+                          aria-label="Metric name"
+                          title={master.description ?? undefined}
+                          value={def?.label ?? master.display_name}
+                          disabled={!included}
+                          onChange={(event) =>
+                            updateConstraintByKey(master.constraint_key, { label: event.target.value })
+                          }
+                          className="w-full rounded border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm disabled:cursor-not-allowed disabled:opacity-50"
+                        />
+                      </div>
+                      <div className="md:col-span-2">
+                        <p className="text-sm text-slate-200">{master.unit}</p>
+                      </div>
+                      <div className="md:col-span-2">
+                        <p className="text-sm text-slate-200">{master.data_type}</p>
+                      </div>
+                      <label className="flex items-center gap-2 text-sm text-slate-300 md:col-span-2">
+                        <input
+                          type="checkbox"
+                          checked={def?.required ?? false}
+                          disabled={!included}
+                          onChange={(event) =>
+                            updateConstraintByKey(master.constraint_key, { required: event.target.checked })
+                          }
+                        />
+                        Required
+                      </label>
+                    </div>
+                  );
+                })}
               </div>
-            </section>
-          )}
+            )}
+          </div>
 
-          {activeTab === "published" && publishedSku && !isModifyMode && (
-            <section className="space-y-6">
-              <div className="rounded-xl border border-emerald-600/30 bg-emerald-950/30 p-5">
-                <h2 className="text-xl font-semibold text-emerald-200">SKU Published</h2>
-                <p className="mt-2 text-sm text-slate-200">
-                  <span className="font-semibold">{publishedSku.name}</span> is now live as{" "}
-                  <span className="font-mono">{publishedSku.sku_id}</span>.
-                </p>
+          <label className="block">
+            <span className="mb-2 block text-sm font-medium text-slate-200">Notes</span>
+            <textarea
+              value={draft.notes}
+              onChange={(event) => setDraft((current) => ({ ...current, notes: event.target.value }))}
+              className="h-24 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-blue-500 focus:ring-2"
+            />
+          </label>
+
+          <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
+            <p className="mb-3 text-sm font-medium text-slate-200">Raw AI Response</p>
+            <button
+              type="button"
+              onClick={() => setIsRawOpen((v) => !v)}
+              className="mb-3 flex w-full items-center justify-between rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-left text-sm font-semibold text-slate-100 transition hover:border-blue-400"
+              aria-expanded={isRawOpen}
+            >
+              <span>Show Raw AI Output</span>
+              <span className="text-xs text-slate-400">{isRawOpen ? "−" : "+"}</span>
+            </button>
+
+            {isRawOpen && (
+              <pre className="max-h-64 overflow-auto rounded-lg bg-slate-950 px-3 py-3 font-mono text-xs text-slate-200 ring-1 ring-slate-800">
+                {lastRawResponse}
+              </pre>
+            )}
+          </div>
+
+          <div className="space-y-4">
+            {validationResult?.valid && (
+              <div className="rounded-lg border border-emerald-700/40 bg-emerald-950/40 px-4 py-3 text-sm text-emerald-200">
+                SKU validation passed — ready to publish
               </div>
-
-              <div className="grid gap-4 rounded-xl border border-slate-800 bg-slate-950/70 p-5 md:grid-cols-2">
-                <p className="text-sm text-slate-300">
-                  <span className="text-slate-500">SKU ID:</span> {publishedSku.sku_id}
-                </p>
-                <p className="text-sm text-slate-300">
-                  <span className="text-slate-500">SKU Name:</span> {publishedSku.name}
-                </p>
-                <p className="text-sm text-slate-300">
-                  <span className="text-slate-500">Product:</span> {selectedProductName ?? publishedSku.product_name ?? "N/A"}
-                </p>
-                <p className="text-sm text-slate-300">
-                  <span className="text-slate-500">Product ID:</span> {publishedSku.product_id ?? "N/A"}
-                </p>
-                <p className="text-sm text-slate-300">
-                  <span className="text-slate-500">Pricing Model:</span> {publishedSku.pricing_model ?? "N/A"}
-                </p>
-                <p className="text-sm text-slate-300">
-                  <span className="text-slate-500">Price:</span>{" "}
-                  {publishedSku.price_per_unit !== null ? `${publishedSku.price_per_unit}/${publishedSku.unit ?? "-"}` : "N/A"}
-                </p>
-                <p className="text-sm text-slate-300">
-                  <span className="text-slate-500">Freemium Limit:</span>{" "}
-                  {publishedSku.freemium_limit !== null ? publishedSku.freemium_limit : "None"}
-                </p>
-                <p className="text-sm text-slate-300">
-                  <span className="text-slate-500">Min Commitment:</span> {publishedSku.min_commitment_months} months
-                </p>
-                <p className="text-sm text-slate-300">
-                  <span className="text-slate-500">Version:</span> {publishedSku.version}
-                </p>
-                <p className="text-sm text-slate-300">
-                  <span className="text-slate-500">Required Flags:</span>{" "}
-                  {publishedSku.required_flags.length ? publishedSku.required_flags.join(", ") : "None"}
-                </p>
-                <p className="text-sm text-slate-300">
-                  <span className="text-slate-500">Optional Flags:</span>{" "}
-                  {publishedSku.optional_flags.length ? publishedSku.optional_flags.join(", ") : "None"}
-                </p>
+            )}
+            {validationResult && !validationResult.valid && (
+              <div className="rounded-lg border border-rose-700/40 bg-rose-950/40 px-4 py-3 text-sm text-rose-200">
+                <ul className="list-disc space-y-1 pl-5">
+                  {validationResult.errors.map((message, index) => (
+                    <li key={`${message}-${index}`}>{message}</li>
+                  ))}
+                </ul>
               </div>
+            )}
+            <div className="flex flex-wrap gap-3">
+              <button
+                type="button"
+                onClick={handleValidateSku}
+                disabled={isValidatingSku}
+                className="rounded-lg border border-blue-500/60 bg-blue-950/40 px-4 py-2 text-sm font-semibold text-blue-100 transition hover:border-blue-400 hover:bg-blue-950/60 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {isValidatingSku ? "Validating..." : "Validate SKU"}
+              </button>
+              <button
+                type="button"
+                onClick={handlePreviewImpact}
+                disabled={isPreviewingImpact}
+                className="rounded-lg border border-slate-600 px-4 py-2 text-sm font-semibold text-slate-100 transition hover:border-blue-400 disabled:opacity-50"
+              >
+                {isPreviewingImpact ? "Previewing..." : "Preview Impact"}
+              </button>
+              <button
+                type="button"
+                onClick={publishSku}
+                disabled={isPublishing || !skuValidationPassed}
+                className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {isPublishing
+                  ? isModifyMode
+                    ? "Re-publishing..."
+                    : "Publishing..."
+                  : isModifyMode
+                    ? "Re-publish SKU"
+                    : "Publish SKU"}
+              </button>
+            </div>
 
-              <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-5">
-                <p className="mb-3 text-sm font-medium text-slate-200">Constraint Definitions</p>
-                <div className="overflow-x-auto rounded-lg border border-slate-800">
-                  <table className="min-w-full text-left text-sm">
-                    <thead className="bg-slate-900 text-slate-300">
-                      <tr>
-                        <th className="px-3 py-2 font-medium">Key</th>
-                        <th className="px-3 py-2 font-medium">Label</th>
-                        <th className="px-3 py-2 font-medium">Type</th>
-                        <th className="px-3 py-2 font-medium">Unit</th>
-                        <th className="px-3 py-2 font-medium">Required</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {publishedSku.constraint_definitions.length === 0 ? (
-                        <tr>
-                          <td colSpan={5} className="px-3 py-3 text-slate-400">
-                            No constraint definitions on this SKU.
-                          </td>
-                        </tr>
-                      ) : (
-                        publishedSku.constraint_definitions.map((constraint, index) => (
-                          <tr key={`${constraint.key}-${index}`} className="border-t border-slate-800 text-slate-200">
-                            <td className="px-3 py-2 font-mono text-xs">{constraint.key}</td>
-                            <td className="px-3 py-2">{constraint.label}</td>
-                            <td className="px-3 py-2">{constraint.type}</td>
-                            <td className="px-3 py-2">{constraint.unit || "-"}</td>
-                            <td className="px-3 py-2">{constraint.required ? "Yes" : "No"}</td>
-                          </tr>
-                        ))
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-5">
-                <p className="mb-3 text-sm font-medium text-slate-200">Provision this SKU to a customer account</p>
-                <div className="flex flex-col gap-3 md:flex-row md:items-center">
-                  <select
-                    value={provisionAccountId}
-                    onChange={(event) => setProvisionAccountId(event.target.value)}
-                    className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none ring-blue-500 focus:ring-2 md:max-w-lg"
-                  >
-                    {ACCOUNT_OPTIONS.map((account) => (
-                      <option key={account.id} value={account.id}>
-                        {account.id} {account.company} ({account.tier})
-                      </option>
-                    ))}
-                  </select>
+            <div className="space-y-2">
+              {impactCount !== null && (
+                <>
                   <button
                     type="button"
-                    onClick={handleProvisionToAccount}
-                    disabled={isProvisioning}
-                    className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+                    onClick={() => setImpactExpanded((open) => !open)}
+                    className="rounded-full border border-amber-500/40 bg-amber-950/40 px-3 py-1 text-left text-sm font-medium text-amber-200 transition hover:border-amber-400 hover:bg-amber-950/60"
+                    aria-expanded={impactExpanded}
                   >
-                    {isProvisioning ? "Provisioning..." : "Provision"}
+                    {impactCount} account(s) affected
+                    <span className="ml-2 text-xs text-amber-300/90">
+                      {impactExpanded ? "Hide details" : "Show details"}
+                    </span>
                   </button>
-                </div>
-
-                {provisionSuccessCompany && (
-                  <div className="mt-4 rounded-lg border border-emerald-700/40 bg-emerald-950/40 px-4 py-3 text-sm text-emerald-200">
-                    SKU successfully provisioned to {provisionSuccessCompany}. View it on the{" "}
-                    <Link href="/dashboard" className="font-semibold text-emerald-100 underline underline-offset-2">
-                      Customer Dashboard
-                    </Link>
-                    .
-                  </div>
-                )}
-                {provisionWarning && (
-                  <div className="mt-4 rounded-lg border border-amber-700/40 bg-amber-950/40 px-4 py-3 text-sm text-amber-200">
-                    {provisionWarning}
-                  </div>
-                )}
-              </div>
-
-              <div className="flex justify-end">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setRawAiOutput(null);
-                    setIsRawOpen(false);
-                    setSkuValidationPassed(false);
-                    setSkuValidationNotice(null);
-                    validatedFingerprintRef.current = null;
-                    setDraft((current) => ({
-                      ...current,
-                      pricing_model: (publishedSku.pricing_model as SkuDraft["pricing_model"]) ?? current.pricing_model,
-                      freemium_limit: publishedSku.freemium_limit,
-                      min_commitment_months: publishedSku.min_commitment_months,
-                      required_flags: publishedSku.required_flags ?? current.required_flags,
-                      optional_flags: publishedSku.optional_flags ?? current.optional_flags,
-                      constraint_definitions:
-                        (publishedSku.constraint_definitions as ConstraintDefinition[]) ?? current.constraint_definitions,
-                    }));
-                    if (publishedSku.product_id) setProductId(publishedSku.product_id);
-                    setIsModifyMode(true);
-                    setActiveTab("review");
-                    setStatusMessage("Modify SKU mode enabled. Update pricing model and republish.");
-                  }}
-                  className="rounded-xl bg-amber-500 px-5 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-amber-400"
-                >
-                  Modify SKU
-                </button>
-              </div>
-            </section>
-          )}
-
-          {activeTab === "published" && isModifyMode && (
-            <div className="rounded-xl border border-amber-600/40 bg-amber-950/30 px-4 py-3 text-sm text-amber-200">
-              Modify mode is active. Continue editing in the Review tab and re-publish when ready.
+                  {impactCount > 0 && !impactExpanded && (
+                    <p className="text-xs text-slate-500">Click the summary badge to view affected accounts and SKUs.</p>
+                  )}
+                  {impactExpanded && (
+                    <div className="max-h-96 overflow-auto rounded-xl border border-slate-800 bg-slate-950/80 shadow-inner shadow-black/20">
+                      <table className="min-w-full text-left text-sm text-slate-200">
+                        <thead className="sticky top-0 z-10 bg-slate-900 text-xs font-semibold uppercase tracking-wide text-slate-400">
+                          <tr>
+                            <th className="px-3 py-2">Account ID</th>
+                            <th className="px-3 py-2">Company Name</th>
+                            <th className="px-3 py-2">Tier</th>
+                            <th className="px-3 py-2">Affected SKU ID</th>
+                            <th className="px-3 py-2">Impact Reason</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {impactRows.length === 0 ? (
+                            <tr>
+                              <td colSpan={5} className="px-3 py-4 text-slate-400">
+                                No matching active entitlements for this preview.
+                              </td>
+                            </tr>
+                          ) : (
+                            impactRows.map((row, index) => (
+                              <tr key={`${row.accountId}-${row.skuId}-${index}`} className="border-t border-slate-800">
+                                <td className="px-3 py-2 font-mono text-xs">{row.accountId}</td>
+                                <td className="px-3 py-2">{row.companyName}</td>
+                                <td className="px-3 py-2">{row.tier}</td>
+                                <td className="px-3 py-2 font-mono text-xs">{row.skuId}</td>
+                                <td className="max-w-md px-3 py-2 text-slate-300">{row.impactReason}</td>
+                              </tr>
+                            ))
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </>
+              )}
             </div>
-          )}
+          </div>
+        </section>
+
+        <section className={`mt-10 space-y-6 border-t border-gray-800 pt-8 ${publishedSectionHidden ? "hidden" : ""}`}>
+          <div className="rounded-xl border border-emerald-600/30 bg-emerald-950/30 p-5">
+            <h2 className="text-xl font-semibold text-emerald-200">Published Summary</h2>
+            <p className="mt-2 text-sm text-slate-200">
+              <span className="font-semibold">{publishedSku?.name}</span> is live as{" "}
+              <span className="font-mono">{publishedSku?.sku_id}</span>.
+            </p>
+          </div>
+
+          <div className="grid gap-4 rounded-xl border border-slate-800 bg-slate-950/70 p-5 md:grid-cols-2">
+            <p className="text-sm text-slate-300">
+              <span className="text-slate-500">SKU ID:</span> {publishedSku?.sku_id}
+            </p>
+            <p className="text-sm text-slate-300">
+              <span className="text-slate-500">SKU Name:</span> {publishedSku?.name}
+            </p>
+            <p className="text-sm text-slate-300">
+              <span className="text-slate-500">Product:</span> {selectedProductName ?? publishedSku?.product_name ?? "N/A"}
+            </p>
+            <p className="text-sm text-slate-300">
+              <span className="text-slate-500">Product ID:</span> {publishedSku?.product_id ?? "N/A"}
+            </p>
+            <p className="text-sm text-slate-300">
+              <span className="text-slate-500">Pricing Model:</span> {publishedSku?.pricing_model ?? "N/A"}
+            </p>
+            <p className="text-sm text-slate-300">
+              <span className="text-slate-500">Price:</span>{" "}
+              {publishedSku?.price_per_unit !== null && publishedSku?.price_per_unit !== undefined
+                ? `${publishedSku.price_per_unit}/${publishedSku.unit ?? "-"}`
+                : "N/A"}
+            </p>
+            <p className="text-sm text-slate-300">
+              <span className="text-slate-500">Freemium Limit:</span>{" "}
+              {publishedSku?.freemium_limit !== null && publishedSku?.freemium_limit !== undefined
+                ? publishedSku.freemium_limit
+                : "None"}
+            </p>
+            <p className="text-sm text-slate-300">
+              <span className="text-slate-500">Min Commitment:</span> {publishedSku?.min_commitment_months} months
+            </p>
+            <p className="text-sm text-slate-300">
+              <span className="text-slate-500">Version:</span> {publishedSku?.version}
+            </p>
+            <p className="text-sm text-slate-300 md:col-span-2">
+              <span className="text-slate-500">Required Flags:</span>{" "}
+              {publishedSku?.required_flags.length ? publishedSku.required_flags.join(", ") : "None"}
+            </p>
+            <p className="text-sm text-slate-300 md:col-span-2">
+              <span className="text-slate-500">Optional Flags:</span>{" "}
+              {publishedSku?.optional_flags.length ? publishedSku.optional_flags.join(", ") : "None"}
+            </p>
+          </div>
+
+          <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-5">
+            <p className="mb-3 text-sm font-medium text-slate-200">Constraint Definitions</p>
+            <div className="overflow-x-auto rounded-lg border border-slate-800">
+              <table className="min-w-full text-left text-sm">
+                <thead className="bg-slate-900 text-slate-300">
+                  <tr>
+                    <th className="px-3 py-2 font-medium">Key</th>
+                    <th className="px-3 py-2 font-medium">Label</th>
+                    <th className="px-3 py-2 font-medium">Type</th>
+                    <th className="px-3 py-2 font-medium">Unit</th>
+                    <th className="px-3 py-2 font-medium">Required</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {!publishedSku || publishedSku.constraint_definitions.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} className="px-3 py-3 text-slate-400">
+                        No constraint definitions on this SKU.
+                      </td>
+                    </tr>
+                  ) : (
+                    publishedSku.constraint_definitions.map((constraint, index) => (
+                      <tr key={`${constraint.key}-${index}`} className="border-t border-slate-800 text-slate-200">
+                        <td className="px-3 py-2 font-mono text-xs">{constraint.key}</td>
+                        <td className="px-3 py-2">{constraint.label}</td>
+                        <td className="px-3 py-2">{constraint.type}</td>
+                        <td className="px-3 py-2">{constraint.unit || "-"}</td>
+                        <td className="px-3 py-2">{constraint.required ? "Yes" : "No"}</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-5">
+            <p className="mb-3 text-sm font-medium text-slate-200">Provision to Account</p>
+            <div className="flex flex-col gap-3 md:flex-row md:items-center">
+              <select
+                value={provisionAccountId}
+                onChange={(event) => setProvisionAccountId(event.target.value)}
+                className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none ring-blue-500 focus:ring-2 md:max-w-lg"
+              >
+                {ACCOUNT_OPTIONS.map((account) => (
+                  <option key={account.id} value={account.id}>
+                    {account.id} {account.company} ({account.tier})
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={handleProvisionToAccount}
+                disabled={isProvisioning}
+                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {isProvisioning ? "Provisioning..." : "Provision"}
+              </button>
+            </div>
+
+            {provisionStatus === "success" && (
+              <div className="mt-4 rounded-lg border border-emerald-700/40 bg-emerald-950/40 px-4 py-3 text-sm text-emerald-200">
+                SKU successfully provisioned. View it on the{" "}
+                <Link href="/dashboard" className="font-semibold text-emerald-100 underline underline-offset-2">
+                  Customer Dashboard
+                </Link>
+                .
+              </div>
+            )}
+            {provisionStatus === "duplicate" && (
+              <div className="mt-4 rounded-lg border border-amber-700/40 bg-amber-950/40 px-4 py-3 text-sm text-amber-200">
+                This account already has an active entitlement for this SKU.
+              </div>
+            )}
+          </div>
+
+          <div className="flex justify-end">
+            <button
+              type="button"
+              onClick={handleEditSku}
+              className="rounded-xl bg-amber-500 px-5 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-amber-400"
+            >
+              Edit SKU
+            </button>
+          </div>
+        </section>
+      </div>
+
+      <div className="flex w-1/2 flex-col">
+        <div className="flex-shrink-0 border-b border-gray-800 p-6">
+          <p className="text-sm text-gray-300">
+            Describe your new product in plain English. The form on the left updates as we talk. When ready, click
+            Validate SKU then Publish SKU.
+          </p>
+        </div>
+
+        <div className="flex flex-1 flex-col overflow-hidden">
+          <div className="flex-1 overflow-y-auto p-6">
+            <div className="flex flex-col gap-3">
+              {messages.map((m, i) =>
+                m.role === "user" ? (
+                  <div key={`${i}-user`} className="flex justify-end">
+                    <div className="max-w-[85%] rounded-2xl bg-blue-900 px-4 py-2 text-sm text-blue-50">
+                      <p className="whitespace-pre-wrap break-words">{m.content}</p>
+                    </div>
+                  </div>
+                ) : (
+                  <div key={`${i}-asst`} className="flex justify-start">
+                    <div className="max-w-[85%] rounded-2xl bg-gray-800 px-4 py-2 text-sm text-gray-100">
+                      <p className="whitespace-pre-wrap break-words">{renderAssistantBoldSegments(m.content)}</p>
+                    </div>
+                  </div>
+                ),
+              )}
+              {isChatLoading && (
+                <div className="flex justify-start">
+                  <div className="rounded-2xl bg-gray-800 px-4 py-3 text-sm text-gray-300">
+                    <span className="inline-flex gap-1">
+                      <span className="animate-bounce">.</span>
+                      <span className="animate-bounce [animation-delay:150ms]">.</span>
+                      <span className="animate-bounce [animation-delay:300ms]">.</span>
+                    </span>
+                  </div>
+                </div>
+              )}
+              <div ref={messagesEndRef} />
+            </div>
+          </div>
+
+          <div className="flex-shrink-0 border-t border-gray-800 p-4">
+            <textarea
+              ref={chatInputRef}
+              value={isChatDisabled ? CHAT_DISABLED_MESSAGE : chatInput}
+              disabled={isChatDisabled || isChatLoading}
+              onChange={(e) => !isChatDisabled && setChatInput(e.target.value)}
+              className="mb-3 min-h-[100px] w-full resize-y rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-gray-100 outline-none ring-blue-500 focus:ring-2 disabled:cursor-not-allowed disabled:opacity-90"
+            />
+            <button
+              type="button"
+              onClick={handleSendMessage}
+              disabled={isChatDisabled || isChatLoading || (!isChatDisabled && !chatInput.trim())}
+              className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Send
+            </button>
+          </div>
         </div>
       </div>
     </main>
