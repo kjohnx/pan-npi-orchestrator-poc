@@ -34,7 +34,8 @@ export async function POST(request: NextRequest) {
   const defs = Array.isArray(draft.constraint_definitions) ? draft.constraint_definitions : [];
 
   const facts: SkuFacts = {
-    pricing_model: typeof draft.pricing_model === "string" ? draft.pricing_model : "",
+    pricing_model:
+      typeof draft.pricing_model === "string" ? draft.pricing_model.trim().toUpperCase() : "",
     freemium_limit:
       typeof draft.freemium_limit === "number" && Number.isFinite(draft.freemium_limit)
         ? draft.freemium_limit
@@ -46,11 +47,11 @@ export async function POST(request: NextRequest) {
         ? draft.min_commitment_months
         : 0,
     unit:
-      draft.unit === undefined || draft.unit === null
-        ? null
-        : String(draft.unit).trim() === ""
-          ? ""
-          : String(draft.unit),
+      typeof draft.unit === "string"
+        ? draft.unit.trim().toUpperCase() || null
+        : draft.unit === null || draft.unit === undefined
+          ? null
+          : String(draft.unit).trim().toUpperCase() || null,
     price_per_unit:
       typeof draft.price_per_unit === "number" && Number.isFinite(draft.price_per_unit)
         ? draft.price_per_unit

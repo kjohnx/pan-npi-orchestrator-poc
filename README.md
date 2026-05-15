@@ -56,14 +56,10 @@ hardcoded field names.
 ## Two Prototypes
 
 ### NPI Fast-Track Tool (`/npi`)
-Internal tool for the NPI/Ops team. Dark theme. Three-tab workflow:
-
-- **Input tab** — paste a plain-English product concept
-- **Review tab** — AI-parsed SKU form, editable before publish.
-  Includes Preview Impact drill-down showing affected accounts
-  and per-account impact reasons
-- **Published tab** — published SKU summary with provision-to-account
-  selector and link to customer dashboard
+Internal tool for the NPI/Ops team. Dark theme. Describe your product concept through a multi-turn conversation — the form updates automatically as the AI understands your intent. **Two-pane layout:** chat on the right
+(`POST /api/npi-chat`), SKU form, validation, impact preview, and publish on the left.
+After publish, **Published Summary** (provision to account, **Edit SKU** for PATCH mode)
+appears on the left below the form.
 
 ### Customer Entitlement Dashboard (`/dashboard`)
 Customer-facing portal. Light theme. Shows:
@@ -132,14 +128,14 @@ npm run dev
 - Customer Dashboard: http://localhost:3000/dashboard
 
 The SQLite database is created automatically on first run and
-seeded with demo data (3 accounts, 5 SKUs, 6 entitlements).
+seeded with demo data (3 accounts, 5 SKUs (plus 1 bundle), 6 entitlements).
 
 ### Reset Demo Data
 
 To restore the database to its original seed state before a demo:
 
 ```bash
-rm data/npi_orchestrator.db
+rm -f data/npi_orchestrator.db data/npi_orchestrator.db-shm data/npi_orchestrator.db-wal
 ```
 
 Then restart the dev server. The database will be recreated
@@ -164,8 +160,8 @@ as an amber warning meter on the dashboard.
 ## Notes
 
 - This is a demo POC — not production code
-- The Anthropic API key is required only for the Generate Schema
-  feature in the NPI tool. All other features work without it
+- The Anthropic API key is required only for the NPI tool’s
+  conversational assistant (`/api/npi-chat`). All other features work without it
 - New SKUs and entitlements created during a session are stored in
   the local SQLite database and persist until reset
 - Built using Cursor AI-assisted development as part of demonstrating
