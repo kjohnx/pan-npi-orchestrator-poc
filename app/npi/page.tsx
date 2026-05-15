@@ -26,6 +26,18 @@ const FLAG_OPTIONS = [
   { id: "shadow-ai-detection", label: "Shadow AI Detection" },
 ] as const;
 
+function normalizeIncomingFlagEntry(raw: string): string {
+  const t = raw.trim();
+  if (FLAG_OPTIONS.some((f) => f.id === t)) return t;
+  const byLabel = FLAG_OPTIONS.find((f) => f.label.toLowerCase() === t.toLowerCase());
+  return byLabel?.id ?? t;
+}
+
+function flagIdToDisplayName(flagId: string): string {
+  const found = FLAG_OPTIONS.find((f) => f.id === flagId);
+  return found ? found.label : flagId;
+}
+
 const ACCOUNT_OPTIONS = [
   { id: "ACC-001", company: "Acme Financial Services", tier: "ENTERPRISE" },
   { id: "ACC-002", company: "Globex Healthcare", tier: "MID-MARKET" },
@@ -397,6 +409,14 @@ export default function NpiPage() {
         if (val === "__unknown__" || val === "unknown") continue;
         if (val === null) {
           (next as Record<string, unknown>)[key] = null;
+        } else if (key === "unit" && typeof val === "string") {
+          (next as Record<string, unknown>)[key] = val.toUpperCase();
+        } else if (key === "pricing_model" && typeof val === "string") {
+          (next as Record<string, unknown>)[key] = val.toUpperCase();
+        } else if ((key === "required_flags" || key === "optional_flags") && Array.isArray(val)) {
+          (next as Record<string, unknown>)[key] = val
+            .filter((x): x is string => typeof x === "string")
+            .map((entry) => normalizeIncomingFlagEntry(entry));
         } else {
           (next as Record<string, unknown>)[key] = val;
         }
@@ -1224,21 +1244,24 @@ export default function NpiPage() {
             </p>
             <p className="text-sm text-slate-300 md:col-span-2">
               <span className="text-slate-500">Required Flags:</span>{" "}
-              {publishedSku?.required_flags.length ? publishedSku.required_flags.join(", ") : "None"}
+              {publishedSku?.required_flags.length
+                ? publishedSku.required_flags.map(flagIdToDisplayName).join(", ")
+                : "None"}
             </p>
             <p className="text-sm text-slate-300 md:col-span-2">
               <span className="text-slate-500">Optional Flags:</span>{" "}
-              {publishedSku?.optional_flags.length ? publishedSku.optional_flags.join(", ") : "None"}
+              {publishedSku?.optional_flags.length
+                ? publishedSku.optional_flags.map(flagIdToDisplayName).join(", ")
+                : "None"}
             </p>
           </div>
 
           <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-5">
-            <p className="mb-3 text-sm font-medium text-slate-200">Constraint Definitions</p>
+            <p className="mb-3 text-sm font-medium text-slate-200">Usage Tracking</p>
             <div className="overflow-x-auto rounded-lg border border-slate-800">
               <table className="min-w-full text-left text-sm">
                 <thead className="bg-slate-900 text-slate-300">
                   <tr>
-                    <th className="px-3 py-2 font-medium">Key</th>
                     <th className="px-3 py-2 font-medium">Label</th>
                     <th className="px-3 py-2 font-medium">Type</th>
                     <th className="px-3 py-2 font-medium">Unit</th>
@@ -1248,14 +1271,13 @@ export default function NpiPage() {
                 <tbody>
                   {!publishedSku || publishedSku.constraint_definitions.length === 0 ? (
                     <tr>
-                      <td colSpan={5} className="px-3 py-3 text-slate-400">
+                      <td colSpan={4} className="px-3 py-3 text-slate-400">
                         No constraint definitions on this SKU.
                       </td>
                     </tr>
                   ) : (
                     publishedSku.constraint_definitions.map((constraint, index) => (
                       <tr key={`${constraint.key}-${index}`} className="border-t border-slate-800 text-slate-200">
-                        <td className="px-3 py-2 font-mono text-xs">{constraint.key}</td>
                         <td className="px-3 py-2">{constraint.label}</td>
                         <td className="px-3 py-2">{constraint.type}</td>
                         <td className="px-3 py-2">{constraint.unit || "-"}</td>

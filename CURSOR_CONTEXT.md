@@ -31,8 +31,7 @@ working, demonstrable functionality — not polish or scale.
 - **Framework:** Next.js 14 (App Router, TypeScript)
 - **Styling:** Tailwind CSS
 - **Database:** SQLite via `better-sqlite3`, file at `/data/npi_orchestrator.db`
-- **AI parsing:** Anthropic Claude API (`claude-sonnet-4-5`) — called from a Next.js
-  API route when the NPI user submits a plain-English product concept
+- **AI assistant:** Anthropic Claude API (`claude-sonnet-4-5`) — **`POST /api/npi-chat`** for multi-turn SKU drafting from conversation
 - **SKU validation (BRMS):** `json-rules-engine` in **`lib/rules/sku-rules.ts`**, invoked from
   **`POST /api/validate-sku`**
 - **Deployment target:** Local — no need to optimize for Vercel serverless
@@ -85,7 +84,7 @@ CHOKIDAR_USEPOLLING=false
 │   │   ├── validate-sku/route.ts  ← POST: BRMS validation for current draft
 │   │   ├── entitlements/route.ts  ← GET (by account), POST (create)
 │   │   ├── entitlements/[id]/route.ts ← PATCH (update status/flags/constraints)
-│   │   └── npi-parse/route.ts     ← POST: calls Claude API, returns parsed SKU schema
+│   │   └── npi-chat/route.ts      ← POST: multi-turn Claude assistant, returns message + form_state
 │   ├── npi/
 │   │   └── page.tsx               ← NPI Fast-Track Tool UI
 │   └── dashboard/
@@ -211,64 +210,24 @@ export function getDb(): Database.Database {
 
 ## API Routes
 
-### `/api/npi-parse` (POST)
-This is the AI parsing endpoint. It receives a plain-English product concept and calls
-the Claude API to return a structured SKU draft.
+### `/api/npi-chat` (POST)
+Multi-turn conversational assistant for the NPI Fast-Track Tool. Replaces the legacy single-shot parse route.
 
-**Request body:**
+**Request body (summary):**
 ```json
 {
-  "concept": "…plain English…",
+  "messages": [{ "role": "user" | "assistant", "content": "…" }],
+  "current_form_state": { },
   "product_id": "PROD-CORTEX-SHIELD"
 }
 ```
-`product_id` is optional. When present, the route loads that product’s `available_flags` and
-`supported_constraints`, fetches matching **`constraint_master`** rows, and **appends** guidance
-to the system prompt: only those flag_ids and constraint_keys may appear in the parsed JSON;
-anything the user mentions outside those lists should be omitted with an explanation in `notes`.
+`product_id` is optional on the request; when set, the system prompt scopes flags and constraints to that product (and DB-backed constraint master rows). When omitted, the model may infer `product_id` into `form_state` from the conversation.
 
-**What it does:**
-- Calls **`claude-sonnet-4-5`** with a system prompt that instructs it to return ONLY
-  valid JSON matching the SKU schema (no prose; no markdown code fences)
-- The system prompt includes the full SKU schema structure as a reference and instructs
-  Claude to **infer `constraint_definitions` from pricing model and unit** when implied
-  by the concept (e.g. usage metric for USAGE/FREEMIUM, seat/endpoint-style metrics for FLAT,
-  tier-driving metric for TIERED)
-- After the model returns text, the route **strips leading/trailing markdown code fences**
-  (e.g. `` ```json `` … `` ``` ``) before `JSON.parse`, so occasional fenced output still parses
-- Returns **`{ data: <parsed schema>, raw: <original model text> }`** on success so the NPI
-  UI can show a transparent “raw AI” view alongside the parsed form
+**Response:** `{ "message": string, "form_state": object }` — the UI merges `form_state` into the SKU draft and appends `message` to the chat.
 
-**System prompt base (canonical copy in `app/api/npi-parse/route.ts`; keep in sync):**
-```
-You are an NPI schema parser for Palo Alto Networks. When given a plain-English
-product concept, extract the structured fields and return ONLY a valid JSON object.
-Do not include any explanation, preamble, or markdown code fences. Return raw JSON only.
+**Implementation notes:** Uses **`claude-sonnet-4-5`**. Model output is passed through **`extractJson`** (fenced `` ```json `` block, else first `{` to last `}`) before `JSON.parse`. Invalid shape returns **502** with **`raw`** (original model text) for debugging.
 
-The JSON must match this structure:
-{
-  "name": string,
-  "pricing_model": "USAGE" | "FLAT" | "TIERED" | "FREEMIUM",
-  "price_per_unit": number,
-  "price_currency": "USD",
-  "unit": "GB" | "SEAT" | "ENDPOINT" | "DEVICE" | "CREDIT" | "MBPS",
-  "freemium_limit": number | null,
-  "min_commitment_months": number,
-  "required_flags": string[],
-  "optional_flags": string[],
-  "constraint_definitions": [
-    { "key": string, "label": string, "type": "NUMERIC" | "STRING" | "BOOLEAN", "unit": string, "required": boolean }
-  ],
-  "notes": string
-}
-
-When product_id is provided in the request body, the route fetches available_flags from the product record and injects them into the system prompt dynamically — only those flag_ids are valid for that product. When no product_id is provided, the base system prompt does not restrict flag_ids and the LLM uses its general knowledge of available flags.
-
-If a field cannot be determined from the input, use null or an empty array.
-Infer sensible constraint_definitions based on the pricing_model and unit when they are implied by the concept.
-For example: USAGE/FREEMIUM usually needs a numeric usage metric (such as usage_gb), FLAT often uses seat/device/endpoint count, and TIERED should include the tier-driving metric.
-Do not wrap the JSON in markdown code fences. Return raw JSON only with no backticks.
-```
+Canonical system prompt and rules live in **`app/api/npi-chat/route.ts`**.
 
 ### `/api/skus` (GET, POST)
 - GET: return all SKUs joined with product name. Include `constraint_definitions` in response.
@@ -350,23 +309,19 @@ for cross-route utilities rather than duplicating logic.
 
 ## NPI Fast-Track Tool — UI Behavior
 
-The NPI tool uses a **3-tab navigation** pattern (not a linear 3-screen wizard). **State is
-preserved** when switching tabs so users can move back to Input or Review without losing
-work. **Gated progression:** Review and Published tabs are visually disabled and non-clickable
-until prerequisites are met — **Review** unlocks after a successful **Generate Schema**;
-**Published** unlocks after **Publish SKU** (first publish). **Modify SKU** (live pivot) lives
-on the Published tab and returns the user to the Review tab in PATCH mode.
+The NPI tool uses a **two-pane layout**: SKU form and actions on the left; **chat** on the right.
+Sending a message calls **`POST /api/npi-chat`** with the conversation, current draft, and optional
+**`product_id`**. The assistant returns **`message`** + **`form_state`**; the client merges into the
+draft. **Validate SKU** / **Preview Impact** / **Publish SKU** live on the left. After publish, a
+**Published Summary** appears below; **Edit SKU** resumes chat in modify (PATCH) mode.
 
-**Tab 1 — Input**
-- Large textarea: "Describe your new product concept"
-- Pre-fill with: *"We are launching AI Access Security for Enterprise customers. It governs employee use of generative AI tools across the organization. Usage-based pricing at $15 per seat, 12-month minimum commitment. Track licensed seat count as the usage constraint. Enable the Policy Enforcement flag by default, with Shadow AI Detection as an optional add-on."*
-- "Generate Schema" button → calls `POST /api/npi-parse` (includes **`product_id`** in the body
-  when a product is already selected on the form) → loading state → switches to Review tab with
-  form populated
+**Chat (right pane)**
+- Pre-filled demo prose (same AI Access Security concept as before).
+- **Send** → `POST /api/npi-chat` (includes **`product_id`** from the draft when set).
 
-**Tab 2 — Review**
-- Form pre-filled from AI output. All fields editable.
-- **Field layout (Review tab):**
+**Form (left pane) — same fields as prior Review tab**
+- Form is updated from **`/api/npi-chat`** merges and is fully editable.
+- **Field layout:**
   - **Row 1:** SKU Name | Product (from `GET /api/products`).
   - **Row 2:** Pricing Model | Min Commitment (months).
   - **Row 3:** Currency | Price per Unit | Unit (three equal columns, left to right).
@@ -429,9 +384,7 @@ constraint is listed in the checklist.
 
 - **Notes:** full-width textarea below Usage Tracking (above Raw AI Response).
 
-- **Raw AI Response:** collapsible section (collapsed by default) with toggle **"Show Raw AI
-  Output"**; when expanded, shows the **raw model text** (`raw` from the parse response) in a
-  monospace block before JSON parsing in the route
+- **Raw AI Response:** collapsible section (collapsed by default); when expanded, shows the last **`/api/npi-chat`** JSON response (for debugging).
 - **Preview Impact:** `GET /api/entitlements` for demo accounts (`ACC-001` … `ACC-003`).
   Shows a summary pill **"N account(s) affected"**; clicking it expands a **scrollable
   drill-down table** (max-height) with **Account ID**, **Company Name**, **Tier**
@@ -484,11 +437,11 @@ constraint is listed in the checklist.
   returns a **separate one-line fallback** (*no pricing model on file*) before falling through
   to case 5.
 - **Publish SKU** → `POST /api/skus` (or **Re-publish** → `PATCH /api/skus/[sku_id]` in modify
-  mode) → Published tab with full summary
+  mode) → **Published Summary** on the left with full details
 
-**Tab 3 — Published**
-- Published SKU summary (ids, pricing, flags, version, etc.) and **constraint_definitions**
-  rendered as a readable table (key, label, type, unit, required)
+**Published Summary (left pane, after publish)**
+- Published SKU summary (ids, pricing, flags, version, etc.) and **Usage Tracking** table
+  (label, type, unit, required — no raw key column)
 - **Provision to Account** section appears below the published summary:
   - Label: **Provision this SKU to a customer account**
   - Account dropdown with known accounts (`ACC-001`, `ACC-002`, `ACC-003`), defaulting to
@@ -505,7 +458,7 @@ constraint is listed in the checklist.
   - On duplicate (`409 { error: "duplicate" }`): yellow warning that account already has
     an active entitlement for that SKU
   - Section remains usable after success for provisioning to additional accounts
-- **Modify SKU** → Review tab in PATCH mode for the freemium pivot demo (`FREEMIUM`,
+- **Edit SKU** → re-enables chat and loads the published SKU into the form in **Modify SKU** (PATCH) mode for the freemium pivot demo (`FREEMIUM`,
   `freemium_limit`, etc.)
 
 ---
@@ -639,12 +592,12 @@ entitlement states.
 ## Demo Flow (end-to-end)
 
 1. Open dashboard → select `ACC-001` → note Cortex Shield Freemium at `3.2/5 GB` amber warning meter
-2. Switch to NPI tool → Input tab → pre-filled AI Access Security Enterprise concept text → click **Generate Schema**
-3. Review tab → verify AI-parsed form fields → click **Preview Impact** → expand drill-down table showing per-account impact reasons
-4. Click **Publish SKU** → Published tab shows SKU summary
+2. Switch to NPI tool → send the pre-filled chat message (or type a concept) → confirm the form updates from **`/api/npi-chat`**
+3. On the left → verify fields → click **Preview Impact** → expand drill-down table showing per-account impact reasons
+4. **Validate SKU** then **Publish SKU** → Published Summary appears on the left
 5. Select `ACC-003` from account dropdown → click **Provision** → success message with Customer Dashboard link
 6. Click Customer Dashboard link → switch to `ACC-003` → new entitlement card appears
-7. Return to NPI tool → click **Modify SKU** → make a live configuration change (e.g. change pricing model or add a freemium tier) → click **Re-publish** → provision updated SKU → dashboard reflects change
+7. Return to NPI tool → click **Edit SKU** → describe changes in chat → **Validate** / **Re-publish** → provision updated SKU → dashboard reflects change
 
 ---
 
@@ -653,7 +606,7 @@ entitlement states.
 To restore the database to clean seed state before a demo, delete the SQLite file and restart:
 
 ```bash
-rm data/npi_orchestrator.db
+rm -f data/npi_orchestrator.db data/npi_orchestrator.db-shm data/npi_orchestrator.db-wal
 npm run dev
 ```
 
